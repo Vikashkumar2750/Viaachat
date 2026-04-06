@@ -37,6 +37,7 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
   const [roomName, setRoomName] = useState('');
   const [roomDescription, setRoomDescription] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [activeView, setActiveView] = useState<'all' | 'mine'>('all');
@@ -77,7 +78,36 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
   const handleCreateRoom = async () => {
     if (!roomName.trim() || !user) return;
     setIsCreating(true);
+    setCreateError(null);
+
+    // Hard timeout: never spin longer than 12s
+    const timeoutId = setTimeout(() => {
+      setIsCreating(false);
+      setCreateError('Room creation timed out. Please check your connection and try again.');
+    }, 12000);
+
     try {
+      // ── Step 1: Ensure user profile exists in DB (FK guard) ──────────────
+      // Room's owner_id FK references users(id). If the profile hasn't been
+      // committed yet (race with auth sync on first load), the insert fails
+      // with a foreign key constraint error. We upsert to guarantee it exists.
+      const { error: upsertError } = await supabase.from('users').upsert(
+        {
+          id: user.uid,
+          display_name: user.displayName,
+          photo_url: user.photoURL,
+          email: user.email || null,
+          last_seen: new Date().toISOString(),
+        },
+        { onConflict: 'id' }
+      );
+
+      if (upsertError) {
+        setCreateError('Could not verify your account. Please sign out and sign back in.');
+        return;
+      }
+
+      // ── Step 2: Build initial seat structure ─────────────────────────────
       const initialSeats: Seat[] = Array.from({ length: 10 }, (_, i) => ({
         id: i,
         userId: null,
@@ -90,9 +120,10 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
         isVideoOn: false,
       }));
 
-      const avatarSeeds = ['abstract', 'shapes', 'identicon', 'pixel-art'];
-      const randomSeed = avatarSeeds[Math.floor(Math.random() * avatarSeeds.length)];
+      // Deterministic avatar using user's ID as seed — no external call during insert
+      const avatarUrl = `https://api.dicebear.com/7.x/shapes/svg?seed=${user.uid}-${Date.now()}`;
 
+      // ── Step 3: Insert the room ──────────────────────────────────────────
       const { data, error } = await supabase.from('rooms').insert({
         name: roomName.trim(),
         description: roomDescription.trim() || null,
@@ -100,18 +131,32 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
         admins: [],
         seats: initialSeats,
         participant_count: 0,
-        avatar_url: `https://api.dicebear.com/7.x/${randomSeed}/svg?seed=${Date.now()}`,
+        avatar_url: avatarUrl,
         is_locked: false,
         banned_user_ids: [],
         typing_status: {},
       }).select().single();
 
-      if (error) { handleSupabaseError(error, 'create-room'); return; }
+      if (error) {
+        if (error.code === '23503') {
+          setCreateError('Account sync error. Please sign out and sign back in.');
+        } else if (error.code === '42501') {
+          setCreateError('Permission denied. Make sure you are signed in.');
+        } else {
+          setCreateError(error.message || 'Failed to create room. Please try again.');
+        }
+        return;
+      }
+
+      // ── Success ──────────────────────────────────────────────────────────
       setRoomName('');
       setRoomDescription('');
       setIsCreateModalOpen(false);
       onRoomSelect(dbToRoom(data));
+    } catch (err: any) {
+      setCreateError(err?.message || 'Unexpected error. Please try again.');
     } finally {
+      clearTimeout(timeoutId);
       setIsCreating(false);
     }
   };
@@ -186,7 +231,7 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
             </p>
           </div>
           <button
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={() => { setIsCreateModalOpen(true); setCreateError(null); }}
             className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500 text-white rounded-2xl shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 transition-all active:scale-90 font-bold text-sm"
           >
             <Plus size={18} />
@@ -353,14 +398,17 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
       {/* Create Room Modal */}
       {isCreateModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-end justify-center p-4">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsCreateModalOpen(false)} />
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isCreating && setIsCreateModalOpen(false)} />
           <div className="relative w-full max-w-md bg-white rounded-t-[2.5rem] shadow-2xl p-7 animate-slide-up">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h3 className="text-2xl font-black text-gray-900">New Room</h3>
                 <p className="text-xs text-gray-400 mt-0.5">10 seats for live discussions</p>
               </div>
-              <button onClick={() => setIsCreateModalOpen(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+              <button
+                onClick={() => !isCreating && setIsCreateModalOpen(false)}
+                className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+              >
                 <X size={22} />
               </button>
             </div>
@@ -377,6 +425,7 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
                   className="w-full bg-gray-50 border-none rounded-2xl py-4 px-5 text-base font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 transition-all"
                   autoFocus
                   maxLength={60}
+                  disabled={isCreating}
                 />
               </div>
               <div>
@@ -388,8 +437,27 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
                   placeholder="What's this room about?"
                   className="w-full bg-gray-50 border-none rounded-2xl py-3.5 px-5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 transition-all"
                   maxLength={100}
+                  disabled={isCreating}
                 />
               </div>
+
+              {/* Error message */}
+              {createError && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 rounded-xl border border-red-100">
+                  <X size={14} className="text-red-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-red-600 font-bold">{createError}</p>
+                </div>
+              )}
+
+              {/* Progress steps when creating */}
+              {isCreating && (
+                <div className="flex flex-col gap-1.5 p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                  <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Setting up your room…</p>
+                  <div className="w-full bg-emerald-100 rounded-full h-1.5 overflow-hidden">
+                    <div className="h-full bg-emerald-500 rounded-full animate-pulse" style={{ width: '70%' }} />
+                  </div>
+                </div>
+              )}
 
               <button
                 onClick={handleCreateRoom}
@@ -399,7 +467,7 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
                 {isCreating ? (
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : <Radio size={20} />}
-                {isCreating ? 'Creating...' : 'Launch Room'}
+                {isCreating ? 'Creating room…' : 'Launch Room'}
               </button>
             </div>
           </div>
@@ -408,7 +476,7 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
 
       <style>{`
         @keyframes slide-up { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        .animate-slide-up { animation: slide-up 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .animate-slide-up { animation: slide-up 0.35s cubic-bezier(0.16, 1, 0.3,1) forwards; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
