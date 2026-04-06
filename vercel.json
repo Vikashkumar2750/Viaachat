@@ -1,27 +1,13 @@
 {
   "version": 2,
   "name": "viaachat",
-  "builds": [
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
     {
-      "src": "package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "dist"
-      }
+      "source": "/((?!assets/).*)",
+      "destination": "/index.html"
     }
-  ],
-  "routes": [
-    {
-      "src": "/assets/(.*)",
-      "dest": "/assets/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/index.html"
-    }
-  ],
-  "env": {
-    "VITE_SUPABASE_URL": "@viaachat-supabase-url",
-    "VITE_SUPABASE_ANON_KEY": "@viaachat-supabase-anon-key"
-  }
+  ]
 }
