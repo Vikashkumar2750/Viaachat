@@ -87,8 +87,10 @@ const SeatCard: React.FC<SeatCardProps> = ({
   }, [menuOpen]);
 
   const handleClick = () => {
-    if (!isOccupied && !seat.isLocked) {
-      if (!seat.offeredToId || seat.offeredToId === myId) {
+    if (!isOccupied) {
+      // Owner and admin can always sit, even in locked seats
+      if (seat.isLocked && !isOwner && !isAdmin) return;
+      if (!seat.offeredToId || seat.offeredToId === myId || isAdmin || isOwner) {
         onSit(seat.id);
       }
     }
@@ -110,11 +112,13 @@ const SeatCard: React.FC<SeatCardProps> = ({
             ${isMe ? 'ring-2 ring-emerald-400 ring-offset-2 ring-offset-gray-900' : ''}
             ${isOccupied
               ? 'bg-gray-800 shadow-lg'
-              : seat.isLocked
+              : seat.isLocked && !isOwner && !isAdmin
                 ? 'bg-gray-800/60 border-2 border-dashed border-gray-700 cursor-not-allowed'
                 : isOfferedToMe
                   ? 'bg-emerald-900/50 border-2 border-dashed border-emerald-500 cursor-pointer hover:bg-emerald-800/50'
-                  : 'bg-gray-800/40 border-2 border-dashed border-white/10 cursor-pointer hover:border-emerald-500/60 hover:bg-gray-800/70'}
+                  : (isOwner || isAdmin) && seat.isLocked
+                    ? 'bg-amber-900/30 border-2 border-dashed border-amber-500/60 cursor-pointer hover:bg-amber-900/50'
+                    : 'bg-gray-800/40 border-2 border-dashed border-white/10 cursor-pointer hover:border-emerald-500/60 hover:bg-gray-800/70'}
           `}
         >
           {isOccupied ? (
@@ -138,8 +142,14 @@ const SeatCard: React.FC<SeatCardProps> = ({
                 <div className="absolute inset-0 rounded-[18px] ring-2 ring-emerald-500/60 animate-pulse pointer-events-none" />
               )}
             </div>
-          ) : seat.isLocked ? (
+          ) : seat.isLocked && !isOwner && !isAdmin ? (
             <Lock size={18} className="text-gray-600" />
+          ) : seat.id === 0 && !isOccupied ? (
+            // Seat 1 is reserved for room owner
+            <div className="text-center px-0.5">
+              <Crown size={14} className="text-amber-400 mx-auto mb-0.5" />
+              <span className="text-[6px] text-amber-400 font-black leading-none">HOST</span>
+            </div>
           ) : isOfferedToMe ? (
             <div className="text-center">
               <UserCheck size={18} className="text-emerald-400 mx-auto mb-0.5" />
@@ -293,8 +303,8 @@ const SeatCard: React.FC<SeatCardProps> = ({
       </div>
 
       {/* Name label */}
-      <p className={`text-[9px] font-black uppercase tracking-wider truncate max-w-[56px] text-center transition-colors ${isOccupied ? (isMe ? 'text-emerald-400' : 'text-white/80') : 'text-white/20'}`}>
-        {isOccupied ? (isMe ? 'You' : seat.userName) : (seat.isLocked ? '🔒' : `Seat ${seat.id + 1}`)}
+      <p className={`text-[9px] font-black uppercase tracking-wider truncate max-w-[56px] text-center transition-colors ${isOccupied ? (isMe ? 'text-emerald-400' : 'text-white/80') : seat.id === 0 ? 'text-amber-400/60' : 'text-white/20'}`}>
+        {isOccupied ? (isMe ? 'You' : seat.userName) : (seat.id === 0 ? '👑 Host' : seat.isLocked ? '🔒' : `Seat ${seat.id + 1}`)}
       </p>
     </div>
   );
@@ -395,6 +405,23 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
     };
     fetchParticipants();
   }, [initialRoom.id]);
+
+  // ─── Auto-sit owner in Seat 1 when entering their own room ──────────────
+  useEffect(() => {
+    if (!isOwner) return;
+    const seat0 = room.seats[0];
+    if (seat0 && !seat0.userId && !isSitting) {
+      // Owner auto-sits in seat 1 (index 0)
+      const newSeats = room.seats.map((s, i) =>
+        i === 0
+          ? { ...s, userId: user.uid, userName: user.displayName, userAvatar: user.photoURL, isMuted: false, isVideoOn: false, isLocked: false }
+          : s
+      );
+      updateSeats(newSeats);
+    }
+  // Only run once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ─── Track my presence in the room ───────────────────────────────────────
   useEffect(() => {
@@ -579,9 +606,12 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
     if (isSitting) return; // Already seated
     const newSeats = room.seats.map(s => {
       if (s.id !== seatId) return s;
+      // Owner and admins can bypass locks and offer restrictions
+      const canBypassRestrictions = isOwner || isAdmin;
       const canSit =
-        (!s.userId && !s.isLocked) &&
-        (!s.offeredToId || s.offeredToId === user.uid || isAdmin);
+        !s.userId &&
+        (canBypassRestrictions || !s.isLocked) &&
+        (!s.offeredToId || s.offeredToId === user.uid || canBypassRestrictions);
       if (!canSit) return s;
       return {
         ...s,

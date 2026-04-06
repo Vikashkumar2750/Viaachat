@@ -20,6 +20,22 @@ interface CallScreenProps {
 const RTCServers = {
   iceServers: [
     { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
+    // Free TURN servers for NAT traversal - required for calls across different networks
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -74,6 +90,25 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
+  // Buffer ICE candidates that arrive before remote description is set
+  const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescSet = useRef(false);
+
+  const applyPendingCandidates = async () => {
+    if (!pc.current || pendingCandidates.current.length === 0) return;
+    for (const candidate of pendingCandidates.current) {
+      try { await pc.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+    }
+    pendingCandidates.current = [];
+  };
+
+  const addOrBufferCandidate = async (candidate: RTCIceCandidateInit) => {
+    if (remoteDescSet.current && pc.current) {
+      try { await pc.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+    } else {
+      pendingCandidates.current.push(candidate);
+    }
+  };
 
   useEffect(() => {
     const startCall = async () => {
@@ -82,7 +117,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: call.isVideo,
           audio: true,
-        }).catch(() => new MediaStream()); // graceful fallback if no camera/mic
+        }).catch(() => new MediaStream());
 
         setLocalStream(stream);
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
@@ -94,6 +129,18 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = event.streams[0];
             setCallStatus('Connected');
+          }
+        };
+
+        // Also detect connection via ICE state
+        pc.current.oniceconnectionstatechange = () => {
+          const state = pc.current?.iceConnectionState;
+          if (state === 'connected' || state === 'completed') {
+            setCallStatus('Connected');
+          } else if (state === 'failed') {
+            setCallStatus('Connection Failed');
+          } else if (state === 'disconnected') {
+            setCallStatus('Reconnecting...');
           }
         };
 
@@ -139,7 +186,12 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
               const data = payload.new as any;
               if (!pc.current?.currentRemoteDescription && data.answer) {
                 await pc.current?.setRemoteDescription(new RTCSessionDescription(data.answer));
+                remoteDescSet.current = true;
+                await applyPendingCandidates();
                 setCallStatus('Ringing...');
+              }
+              if (data.status === 'connected') {
+                setCallStatus('Connected');
               }
               if (data.status === 'ended' || data.status === 'rejected') {
                 setCallStatus('Ended');
@@ -159,7 +211,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
             }, async payload => {
               const c = payload.new as any;
               if (c.role === 'receiver') {
-                await pc.current?.addIceCandidate(new RTCIceCandidate(c.candidate));
+                await addOrBufferCandidate(c.candidate);
               }
             })
             .subscribe();
@@ -180,6 +232,9 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
           if (signalData?.offer) {
             await pc.current.setRemoteDescription(new RTCSessionDescription(signalData.offer));
+            remoteDescSet.current = true;
+            await applyPendingCandidates(); // Apply any buffered candidates
+
             const answerDescription = await pc.current.createAnswer();
             await pc.current.setLocalDescription(answerDescription);
             await supabase.from('call_signals').update({
@@ -217,7 +272,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
             }, async payload => {
               const c = payload.new as any;
               if (c.role === 'caller') {
-                await pc.current?.addIceCandidate(new RTCIceCandidate(c.candidate));
+                await addOrBufferCandidate(c.candidate);
               }
             })
             .subscribe();

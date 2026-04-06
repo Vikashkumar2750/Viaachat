@@ -110,25 +110,51 @@ const App: React.FC = () => {
 
   // ─── Auth: listen to Supabase auth changes ─────────────────────────────────
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        await syncUser(session.user);
-        const { data: profile } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', session.user.id)
-          .single();
+    // Hard timeout: never stay in loading state longer than 6 seconds
+    const loadingTimeout = setTimeout(() => setLoading(false), 6000);
 
-        if (profile) {
-          setUser(dbToUser(profile));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      try {
+        if (session?.user) {
+          // Only sync user data on actual sign-in or token refresh, not on every page load
+          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+            await syncUser(session.user);
+          }
+
+          const { data: profile, error: profileError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
+
+          if (profile && !profileError) {
+            setUser(dbToUser(profile));
+          } else if (profileError) {
+            // Profile doesn't exist yet, create it
+            await syncUser(session.user);
+            const { data: retryProfile } = await supabase
+              .from('users')
+              .select('*')
+              .eq('id', session.user.id)
+              .single();
+            if (retryProfile) setUser(dbToUser(retryProfile));
+          }
+        } else {
+          setUser(null);
         }
-      } else {
+      } catch (err) {
+        console.error('Auth state change error:', err);
         setUser(null);
+      } finally {
+        clearTimeout(loadingTimeout);
+        setLoading(false);
       }
-      setLoading(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(loadingTimeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   // ─── Presence: update lastSeen every 5 minutes ─────────────────────────────
