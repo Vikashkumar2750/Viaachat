@@ -1,0 +1,200 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: uid
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string (required)
+    //   - photoURL: string (optional)
+    //   - email: string (required)
+    //   - lastSeen: timestamp (optional)
+    //
+    // Collection: chats
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (optional, for groups)
+    //   - avatarUrl: string (optional)
+    //   - lastMessage: string (optional)
+    //   - lastMessageTime: timestamp (optional)
+    //   - isGroup: bool (required)
+    //   - participants: list of strings (required, uids)
+    //   - createdBy: string (uid)
+    //   - createdAt: timestamp
+    //
+    // Collection: chats/{chatId}/messages
+    // Fields:
+    //   - text: string (required)
+    //   - senderId: string (required)
+    //   - senderName: string (required)
+    //   - timestamp: timestamp (required)
+    //   - type: string (text, video, sticker, gif)
+    //
+    // Collection: calls
+    // Fields:
+    //   - callerId: string (required)
+    //   - receiverId: string (required)
+    //   - type: string (incoming, outgoing, missed)
+    //   - timestamp: timestamp (required)
+    //   - isVideo: bool (required)
+    //
+    // Collection: communities
+    // Fields:
+    //   - name: string (required)
+    //   - description: string (required)
+    //   - avatarUrl: string (required)
+    //   - groupsCount: number
+    //   - createdBy: string (uid)
+    //
+    // Collection: statuses
+    // Fields:
+    //   - userId: string (required)
+    //   - name: string (required)
+    //   - avatarUrl: string (required)
+    //   - timestamp: timestamp (required)
+    //   - viewed: bool
+    //   - isMine: bool
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isParticipant(chatData) {
+      return isAuthenticated() && request.auth.uid in chatData.participants;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'displayName']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.displayName is string && data.displayName.size() > 0 &&
+             (data.email == null || data.email == "" || data.email is string);
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['text', 'senderId', 'timestamp']) &&
+             data.text is string && data.text.size() <= 5000 &&
+             data.senderId == request.auth.uid &&
+             (!('reactions' in data) || data.reactions is map);
+    }
+
+    function isValidCommunity(data) {
+      return data.keys().hasAll(['name', 'description', 'avatarUrl']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.description is string && data.description.size() > 0 && data.description.size() < 1000 &&
+             data.avatarUrl is string;
+    }
+
+    function isValidStatus(data) {
+      return data.keys().hasAll(['userId', 'name', 'avatarUrl', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             data.name is string &&
+             data.avatarUrl is string &&
+             (!('text' in data) || data.text is string) &&
+             (!('contentUrl' in data) || data.contentUrl is string) &&
+             (!('backgroundColor' in data) || data.backgroundColor is string);
+    }
+
+    function isValidFriendRequest(data) {
+      return data.keys().hasAll(['fromId', 'toId', 'status', 'timestamp']) &&
+             data.fromId == request.auth.uid &&
+             data.status == 'pending';
+    }
+
+    function isValidRoom(data) {
+      return data.keys().hasAll(['name', 'ownerId', 'seats', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.ownerId == request.auth.uid &&
+             data.seats is list && data.seats.size() == 6;
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) && isValidUser(request.resource.data);
+      
+      match /contacts/{contactId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    match /chats/{chatId} {
+      allow read: if isAuthenticated() && (resource == null || request.auth.uid in resource.data.participants);
+      allow create: if isAuthenticated() && request.auth.uid in request.resource.data.participants;
+      allow update: if isAuthenticated() && request.auth.uid in resource.data.participants;
+      
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+        allow create: if isAuthenticated() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants && isValidMessage(request.resource.data);
+        allow update: if isAuthenticated() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants && (request.resource.data.diff(resource.data).affectedKeys().hasAny(['reactions', 'isPinned']));
+      }
+    }
+
+    match /calls/{callId} {
+      allow read: if isAuthenticated() && (resource.data.callerId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.callerId == request.auth.uid;
+    }
+
+    match /communities/{communityId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidCommunity(request.resource.data);
+      allow update, delete: if isAuthenticated() && resource.data.createdBy == request.auth.uid;
+    }
+
+    match /statuses/{statusId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidStatus(request.resource.data);
+      allow update: if isAuthenticated() && (isOwner(resource.data.userId) || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewed'])));
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    match /friendRequests/{requestId} {
+      allow read: if isAuthenticated() && (resource.data.fromId == request.auth.uid || resource.data.toId == request.auth.uid);
+      allow create: if isAuthenticated() && isValidFriendRequest(request.resource.data);
+      allow update: if isAuthenticated() && (resource.data.toId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']));
+      allow delete: if isAuthenticated() && (resource.data.fromId == request.auth.uid || resource.data.toId == request.auth.uid);
+    }
+
+    match /rooms/{roomId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidRoom(request.resource.data);
+      allow update: if isAuthenticated() && (
+        (resource.data.ownerId == request.auth.uid || request.auth.uid in resource.data.admins) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seats', 'participantCount']))
+      );
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && request.resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    match /call_signals/{signalId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.callerId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.callerId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && (resource.data.callerId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+
+      match /callerCandidates/{candidateId} {
+        allow read, write: if isAuthenticated();
+      }
+      match /receiverCandidates/{candidateId} {
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    match /_connection_test_/{docId} {
+      allow read: if isAuthenticated();
+    }
+  }
+}

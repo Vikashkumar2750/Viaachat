@@ -1,0 +1,33 @@
+{
+  "name": "viaachat",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "sb": "supabase",
+    "sb:login": "supabase login",
+    "sb:init": "supabase init",
+    "sb:link": "supabase link",
+    "sb:push": "supabase db push",
+    "sb:pull": "supabase db pull",
+    "sb:status": "supabase status",
+    "sb:diff": "supabase db diff"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "lucide-react": "^0.462.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "supabase": "^2.85.0",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.0"
+  }
+}

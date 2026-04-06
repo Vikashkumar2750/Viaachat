@@ -1,0 +1,8 @@
+{
+  "name": "Remix: ViaaChat",
+  "description": "A feature-rich WhatsApp clone with real-time chat, calls, and communities. Supports Google and anonymous authentication, contact management, and a polished mobile-first UI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

@@ -1,0 +1,191 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the application",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "email": { "type": "string" },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName"]
+    },
+    "Chat": {
+      "title": "Chat",
+      "description": "A conversation between users or a group",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "lastMessage": { "type": "string" },
+        "lastMessageTime": { "type": "string", "format": "date-time" },
+        "isGroup": { "type": "boolean" },
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participants", "isGroup"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A message within a chat",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "type": { "type": "string", "enum": ["text", "video", "sticker", "gif"] },
+        "reactions": { 
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "required": ["text", "senderId", "timestamp"]
+    },
+    "Call": {
+      "title": "Call",
+      "description": "A record of a call",
+      "type": "object",
+      "properties": {
+        "callerId": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "type": { "type": "string", "enum": ["incoming", "outgoing", "missed"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "isVideo": { "type": "boolean" }
+      },
+      "required": ["callerId", "receiverId", "type", "timestamp"]
+    },
+    "Community": {
+      "title": "Community",
+      "description": "A community of users and groups",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "groupsCount": { "type": "integer" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["name", "description", "avatarUrl"]
+    },
+    "Status": {
+      "title": "Status",
+      "description": "A user status update",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "text": { "type": "string" },
+        "contentUrl": { "type": "string" },
+        "backgroundColor": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "viewed": { "type": "boolean" }
+      },
+      "required": ["userId", "name", "avatarUrl", "timestamp"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "A request to connect with another user",
+      "type": "object",
+      "properties": {
+        "fromId": { "type": "string" },
+        "fromName": { "type": "string" },
+        "fromAvatarUrl": { "type": "string" },
+        "toId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fromId", "toId", "status", "timestamp"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "A room for discussions with seats",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "admins": { "type": "array", "items": { "type": "string" } },
+        "seats": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer" },
+              "userId": { "type": "string" },
+              "userName": { "type": "string" },
+              "userAvatar": { "type": "string" },
+              "isMuted": { "type": "boolean" },
+              "isClosed": { "type": "boolean" }
+            }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "participantCount": { "type": "integer" },
+        "description": { "type": "string" },
+        "avatarUrl": { "type": "string" }
+      },
+      "required": ["name", "ownerId", "seats", "createdAt"]
+    },
+    "RoomMessage": {
+      "title": "RoomMessage",
+      "description": "A message within a room",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderAvatar": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "mentions": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["roomId", "senderId", "text", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data"
+    },
+    "/chats/{chatId}": {
+      "schema": "Chat",
+      "description": "Chat metadata"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Messages in a chat"
+    },
+    "/calls/{callId}": {
+      "schema": "Call",
+      "description": "Call history"
+    },
+    "/communities/{communityId}": {
+      "schema": "Community",
+      "description": "Community data"
+    },
+    "/statuses/{statusId}": {
+      "schema": "Status",
+      "description": "User status updates"
+    },
+    "/friendRequests/{requestId}": {
+      "schema": "FriendRequest",
+      "description": "Friend requests between users"
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Room metadata and seat state"
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": "RoomMessage",
+      "description": "Messages in a room"
+    }
+  }
+}
