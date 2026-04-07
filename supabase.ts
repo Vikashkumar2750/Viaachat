@@ -19,11 +19,19 @@ export const supabase = createClient(
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: true,
+      // Unique storage key per app to avoid cross-tab lock conflicts
+      storageKey: 'viaachat-auth-token',
+      // Suppress Supabase's own console warning about dangling promises
+      debug: false,
     },
     realtime: {
       params: {
         eventsPerSecond: 10,
       },
+    },
+    // Increase global fetch timeout for slow networks
+    global: {
+      headers: { 'x-application-name': 'viaachat' },
     },
   }
 );
@@ -67,13 +75,33 @@ export async function signUpWithEmail(email: string, password: string, displayNa
 }
 
 export async function signInAsGuest() {
-  const { data, error } = await supabase.auth.signInAnonymously();
-  if (error) throw error;
-  return data;
+  // Race the anonymous sign-in against a 6-second timeout.
+  // Without the timeout, a stuck auth lock makes this hang indefinitely.
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(
+      'Guest sign-in timed out. Please enable Anonymous Auth in Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins, then try again.'
+    )), 6000)
+  );
+
+  try {
+    const { data, error } = await Promise.race([
+      supabase.auth.signInAnonymously(),
+      timeoutPromise,
+    ]) as any;
+    if (error) throw error;
+    return data;
+  } catch (err: any) {
+    if (err?.message?.includes('not enabled') || err?.status === 422) {
+      throw new Error(
+        'Anonymous login is not enabled. Go to Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins and enable it.'
+      );
+    }
+    throw err;
+  }
 }
 
 export async function signOut() {
-  const { error } = await supabase.auth.signOut();
+  const { error } = await supabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
 }
 
@@ -110,6 +138,7 @@ export async function syncUser(authUser: { id: string; email?: string | null; us
 }
 
 export async function updateUserPresence(userId: string) {
+  if (!userId) return;
   await supabase
     .from('users')
     .update({ last_seen: new Date().toISOString() })
@@ -140,5 +169,7 @@ export { RealtimeChannel };
 
 export function handleSupabaseError(error: any, context: string) {
   if (!error) return;
+  // Don't log auth lock errors — they're transient and non-critical
+  if (error.message?.includes('Lock') || error.code === 'auth_lock_conflict') return;
   console.error(`Supabase Error [${context}]:`, error.message || error);
 }

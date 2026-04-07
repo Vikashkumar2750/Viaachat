@@ -41,6 +41,14 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [activeView, setActiveView] = useState<'all' | 'mine'>('all');
+  const [roomsToast, setRoomsToast] = useState<string | null>(null);
+
+  // Auto-dismiss rooms toast
+  useEffect(() => {
+    if (!roomsToast) return;
+    const t = setTimeout(() => setRoomsToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [roomsToast]);
 
   // ─── Fetch rooms (real-time) ───────────────────────────────────────────────
   useEffect(() => {
@@ -201,11 +209,11 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
   const handleEnterRoom = (room: Room) => {
     const isAdmin = room.ownerId === user.uid || room.admins.includes(user.uid);
     if (room.isLocked && !isAdmin) {
-      alert('This room is currently locked by the owner.');
+      setRoomsToast('🔒 This room is locked by the owner.');
       return;
     }
     if (room.bannedUserIds.includes(user.uid)) {
-      alert('You are banned from this room.');
+      setRoomsToast('🚫 You are banned from this room.');
       return;
     }
     onRoomSelect(room);
@@ -221,6 +229,12 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
 
   return (
     <div className="h-full bg-gray-50 flex flex-col">
+      {/* Rooms Toast */}
+      {roomsToast && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[999] bg-slate-800 text-white px-5 py-3 rounded-2xl shadow-2xl text-sm font-bold max-w-[90vw] text-center pointer-events-none animate-fade-in">
+          {roomsToast}
+        </div>
+      )}
       {/* Header */}
       <div className="px-5 pt-5 pb-4 bg-white border-b border-gray-100">
         <div className="flex items-center justify-between mb-4">
@@ -474,12 +488,6 @@ export const RoomsScreen: React.FC<RoomsScreenProps> = ({ user, contacts, onRoom
         </div>
       )}
 
-      <style>{`
-        @keyframes slide-up { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        .animate-slide-up { animation: slide-up 0.35s cubic-bezier(0.16, 1, 0.3,1) forwards; }
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-      `}</style>
     </div>
   );
 };

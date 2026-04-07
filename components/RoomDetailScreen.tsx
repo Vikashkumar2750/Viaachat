@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { supabase, handleSupabaseError } from '../supabase';
 import type { Room, User, Contact, Seat, RoomMessage, RoomParticipant } from '../types';
+import { useRoomAudio } from '../hooks/useRoomAudio';
 
 interface RoomDetailScreenProps {
   room: Room;
@@ -362,22 +363,41 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
   const [copied, setCopied] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [mentionSearch, setMentionSearch] = useState<string | null>(null);
+  const [roomToast, setRoomToast] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const roomToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showRoomToast = (msg: string) => {
+    setRoomToast(msg);
+    if (roomToastTimerRef.current) clearTimeout(roomToastTimerRef.current);
+    roomToastTimerRef.current = setTimeout(() => setRoomToast(null), 3000);
+  };
 
   const isOwner = room.ownerId === user.uid;
   const isAdmin = isOwner || (room.admins?.includes(user.uid) || false);
   const myCurrentSeat = room.seats.find(s => s.userId === user.uid);
   const isSitting = !!myCurrentSeat;
 
-  // ─── Fetch initial messages ───────────────────────────────────────────────
+  // ─── Room Audio: WebRTC mesh audio between seated users ──────────────────
+  const seatedUserIds = room.seats.filter(s => s.userId).map(s => s.userId as string);
+  const { connectToNewUser, disconnectFromUser } = useRoomAudio({
+    roomId: initialRoom.id,
+    myUserId: user.uid,
+    seatedUserIds,
+    isMuted: myCurrentSeat?.isMuted ?? true,
+    isEnabled: isSitting,
+  });
+
+  // ─── Fetch initial messages (filter out WebRTC signals) ──────────────────
   useEffect(() => {
     const fetchMessages = async () => {
       const { data } = await supabase
         .from('room_messages')
         .select('*')
         .eq('room_id', initialRoom.id)
+        .neq('sender_name', '__webrtc__')
         .order('timestamp', { ascending: true })
         .limit(100);
       if (data) setMessages(data.map(dbToMessage));
@@ -427,8 +447,8 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
   useEffect(() => {
     // Check for ban
     if (room.bannedUserIds?.includes(user.uid)) {
-      alert('You have been removed from this room.');
-      onClose();
+      showRoomToast('You have been banned from this room.');
+      setTimeout(onClose, 2000);
       return;
     }
 
@@ -482,18 +502,21 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
         });
         // Check ban in real-time
         if ((r.banned_user_ids || []).includes(user.uid)) {
-          alert('You have been removed from this room.');
-          onClose();
+          showRoomToast('You have been removed from this room.');
+          setTimeout(onClose, 2000);
         }
       })
-      // 2. Room messages (new messages)
+      // 2. Room messages — filter out WebRTC signaling messages
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'room_messages',
         filter: `room_id=eq.${initialRoom.id}`,
       }, (payload) => {
-        setMessages(prev => [...prev, dbToMessage(payload.new as any)]);
+        const row = payload.new as any;
+        // Skip WebRTC signaling messages
+        if (row.sender_name === '__webrtc__') return;
+        setMessages(prev => [...prev, dbToMessage(row)]);
       })
       // 3. Room participants (online users)
       .on('postgres_changes', {
@@ -760,6 +783,12 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
 
   return (
     <div className="fixed inset-0 z-[150] bg-gray-950 flex flex-col overflow-hidden">
+      {/* Room Toast */}
+      {roomToast && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800/95 text-white px-5 py-3 rounded-2xl shadow-2xl text-sm font-bold animate-pulse max-w-[90vw] text-center pointer-events-none">
+          {roomToast}
+        </div>
+      )}
       {/* ─── HEADER ─────────────────────────────────────────────────────────── */}
       <header className="relative flex-shrink-0 px-4 pt-10 pb-3 flex items-center justify-between bg-gradient-to-b from-gray-950 to-gray-950/0 z-10">
         <div className="flex items-center gap-3">
@@ -1012,10 +1041,10 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
                           timestamp: new Date().toISOString(),
                           type: 'text',
                         });
-                        alert(`Invite sent to ${contact.name}!`);
+                        showRoomToast(`✉️ Invite sent to ${contact.name}!`);
                       } else {
                         copyRoomId();
-                        alert(`Copied room ID! Share Room #${room.numericId} with ${contact.name}`);
+                        showRoomToast(`✅ Invite link copied for ${contact.name}!`);
                       }
                     }}
                     className="px-3 py-1.5 bg-emerald-500/20 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-500/30 transition-all"
@@ -1098,14 +1127,6 @@ export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
         </div>
       )}
 
-      <style>{`
-        @keyframes slide-up { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        .animate-slide-up { animation: slide-up 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes scale-in { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        .animate-scale-in { animation: scale-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-      `}</style>
     </div>
   );
 };

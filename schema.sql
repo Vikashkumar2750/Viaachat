@@ -1,6 +1,7 @@
 -- ================================================================
--- VIAACHAT - Supabase PostgreSQL Schema
+-- VIAACHAT - Supabase PostgreSQL Schema v2
 -- Run this in the Supabase SQL Editor AFTER enabling auth providers
+-- This is an UPDATED version - safe to run on existing databases (IF NOT EXISTS)
 -- ================================================================
 
 -- ===========================
@@ -39,11 +40,11 @@ CREATE TABLE IF NOT EXISTS public.chats (
   typing_status JSONB DEFAULT '{}'
 );
 
--- Chat Messages
+-- Chat Messages (updated to support audio/image)
 CREATE TABLE IF NOT EXISTS public.chat_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   chat_id UUID NOT NULL REFERENCES public.chats(id) ON DELETE CASCADE,
-  text TEXT NOT NULL CHECK (char_length(text) <= 10000),
+  text TEXT NOT NULL CHECK (char_length(text) <= 2000000), -- up to 2MB for base64 images/audio
   sender_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   sender_name TEXT NOT NULL,
   timestamp TIMESTAMPTZ DEFAULT now(),
@@ -63,9 +64,9 @@ CREATE TABLE IF NOT EXISTS public.calls (
   duration INTEGER DEFAULT 0
 );
 
--- Call Signals (WebRTC signaling)
+-- Call Signals (WebRTC signaling) - id matches calls.id for easy linking
 CREATE TABLE IF NOT EXISTS public.call_signals (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY, -- matches calls.id UUID
   caller_id TEXT NOT NULL,
   receiver_id TEXT NOT NULL,
   offer JSONB,
@@ -84,13 +85,30 @@ CREATE TABLE IF NOT EXISTS public.ice_candidates (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Random Call Matchmaking Queue
+-- Users who click "Random Call" are added here. When two users are in the queue,
+-- they are auto-matched and a call starts without any accept dialog.
+CREATE TABLE IF NOT EXISTS public.call_queue (
+  user_id TEXT PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+  user_name TEXT NOT NULL,
+  user_avatar TEXT,
+  is_video BOOLEAN DEFAULT false,
+  searching_since TIMESTAMPTZ DEFAULT now(),
+  -- Populated when matched:
+  matched_with TEXT REFERENCES public.users(id) ON DELETE SET NULL,
+  matched_name TEXT,
+  matched_avatar TEXT,
+  call_id TEXT
+);
+
+
 -- Statuses
 CREATE TABLE IF NOT EXISTS public.statuses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   avatar_url TEXT,
-  content_url TEXT,
+  content_url TEXT, -- can store base64 for images
   text TEXT,
   background_color TEXT,
   timestamp TIMESTAMPTZ DEFAULT now(),
@@ -103,7 +121,7 @@ CREATE TABLE IF NOT EXISTS public.communities (
   name TEXT NOT NULL CHECK (char_length(name) > 0 AND char_length(name) < 100),
   description TEXT,
   avatar_url TEXT,
-  groups_count INTEGER DEFAULT 0,
+  groups_count INTEGER DEFAULT 3,
   created_by TEXT REFERENCES public.users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -137,7 +155,7 @@ CREATE TABLE IF NOT EXISTS public.rooms (
   typing_status JSONB DEFAULT '{}'
 );
 
--- Room Participants (who is currently in the room - real-time presence)
+-- Room Participants (who is currently in the room)
 CREATE TABLE IF NOT EXISTS public.room_participants (
   room_id UUID NOT NULL REFERENCES public.rooms(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
@@ -174,8 +192,18 @@ CREATE INDEX IF NOT EXISTS idx_rooms_owner ON public.rooms(owner_id);
 CREATE INDEX IF NOT EXISTS idx_room_participants_room ON public.room_participants(room_id);
 CREATE INDEX IF NOT EXISTS idx_room_messages_room ON public.room_messages(room_id, timestamp ASC);
 CREATE INDEX IF NOT EXISTS idx_statuses_timestamp ON public.statuses(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_statuses_user ON public.statuses(user_id);
 CREATE INDEX IF NOT EXISTS idx_ice_candidates_signal ON public.ice_candidates(signal_id, role);
 CREATE INDEX IF NOT EXISTS idx_call_signals_ids ON public.call_signals(caller_id, receiver_id);
+CREATE INDEX IF NOT EXISTS idx_call_signals_receiver ON public.call_signals(receiver_id, status);
+CREATE INDEX IF NOT EXISTS idx_users_last_seen ON public.users(last_seen DESC);
+
+-- ===========================
+-- AUTO-CLEANUP: Old call signals (older than 1 hour)
+-- ===========================
+-- Run this periodically or use pg_cron if available
+-- DELETE FROM public.call_signals WHERE created_at < now() - interval '1 hour';
+-- DELETE FROM public.statuses WHERE timestamp < now() - interval '24 hours';
 
 -- ===========================
 -- ROW LEVEL SECURITY
@@ -194,132 +222,147 @@ ALTER TABLE public.rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_messages ENABLE ROW LEVEL SECURITY;
 
--- Users policies
-CREATE POLICY "Authenticated users can view all profiles" ON public.users
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Users can insert own profile" ON public.users
-  FOR INSERT WITH CHECK (auth.uid()::text = id);
-CREATE POLICY "Users can update own profile" ON public.users
-  FOR UPDATE USING (auth.uid()::text = id);
+-- ===========================
+-- DROP OLD CONFLICTING POLICIES (safe to ignore errors)
+-- ===========================
 
--- Chats policies
-CREATE POLICY "Users can view own chats" ON public.chats
-  FOR SELECT USING (auth.uid()::text = ANY(participants));
-CREATE POLICY "Authenticated users can create chats" ON public.chats
-  FOR INSERT WITH CHECK (auth.uid()::text = ANY(participants));
-CREATE POLICY "Participants can update chat" ON public.chats
-  FOR UPDATE USING (auth.uid()::text = ANY(participants));
-CREATE POLICY "Participants can delete chat" ON public.chats
-  FOR DELETE USING (auth.uid()::text = created_by OR auth.uid()::text = ANY(participants));
+DO $$ BEGIN
+  -- Users
+  DROP POLICY IF EXISTS "Authenticated users can view all profiles" ON public.users;
+  DROP POLICY IF EXISTS "Users can insert own profile" ON public.users;
+  DROP POLICY IF EXISTS "Users can update own profile" ON public.users;
+  -- Chats
+  DROP POLICY IF EXISTS "Users can view own chats" ON public.chats;
+  DROP POLICY IF EXISTS "Authenticated users can create chats" ON public.chats;
+  DROP POLICY IF EXISTS "Participants can update chat" ON public.chats;
+  DROP POLICY IF EXISTS "Participants can delete chat" ON public.chats;
+  -- Messages
+  DROP POLICY IF EXISTS "Participants can view messages" ON public.chat_messages;
+  DROP POLICY IF EXISTS "Participants can send messages" ON public.chat_messages;
+  DROP POLICY IF EXISTS "Participants can update reactions/pin" ON public.chat_messages;
+  DROP POLICY IF EXISTS "Senders can delete own messages" ON public.chat_messages;
+  -- Calls
+  DROP POLICY IF EXISTS "Users can view their calls" ON public.calls;
+  DROP POLICY IF EXISTS "Users can log calls" ON public.calls;
+  DROP POLICY IF EXISTS "Users can update call duration" ON public.calls;
+  -- Call Signals
+  DROP POLICY IF EXISTS "Users can view their signals" ON public.call_signals;
+  DROP POLICY IF EXISTS "Callers can create signals" ON public.call_signals;
+  DROP POLICY IF EXISTS "Participants can update signals" ON public.call_signals;
+  -- ICE
+  DROP POLICY IF EXISTS "Authenticated users can view ice candidates" ON public.ice_candidates;
+  DROP POLICY IF EXISTS "Authenticated users can insert ice candidates" ON public.ice_candidates;
+  -- Statuses
+  DROP POLICY IF EXISTS "Authenticated users can view statuses" ON public.statuses;
+  DROP POLICY IF EXISTS "Users can create own status" ON public.statuses;
+  DROP POLICY IF EXISTS "Users can update own status" ON public.statuses;
+  DROP POLICY IF EXISTS "Users can delete own status" ON public.statuses;
+  -- Communities
+  DROP POLICY IF EXISTS "Authenticated can view communities" ON public.communities;
+  DROP POLICY IF EXISTS "Authenticated can create communities" ON public.communities;
+  DROP POLICY IF EXISTS "Creators can update communities" ON public.communities;
+  DROP POLICY IF EXISTS "Creators can delete communities" ON public.communities;
+  -- Friend Requests
+  DROP POLICY IF EXISTS "Users can see their requests" ON public.friend_requests;
+  DROP POLICY IF EXISTS "Users can send requests" ON public.friend_requests;
+  DROP POLICY IF EXISTS "Recipients can update requests" ON public.friend_requests;
+  DROP POLICY IF EXISTS "Users can delete own requests" ON public.friend_requests;
+  -- Rooms
+  DROP POLICY IF EXISTS "Authenticated can view rooms" ON public.rooms;
+  DROP POLICY IF EXISTS "Authenticated can create rooms" ON public.rooms;
+  DROP POLICY IF EXISTS "Anyone authenticated can update rooms" ON public.rooms;
+  DROP POLICY IF EXISTS "Owners can delete rooms" ON public.rooms;
+  -- Room Participants
+  DROP POLICY IF EXISTS "Authenticated can view room participants" ON public.room_participants;
+  DROP POLICY IF EXISTS "Users can join rooms" ON public.room_participants;
+  DROP POLICY IF EXISTS "Users can leave rooms" ON public.room_participants;
+  DROP POLICY IF EXISTS "Participants can update presence" ON public.room_participants;
+  -- Room Messages
+  DROP POLICY IF EXISTS "Authenticated can view room messages" ON public.room_messages;
+  DROP POLICY IF EXISTS "Authenticated can send room messages" ON public.room_messages;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
--- Chat Messages policies
-CREATE POLICY "Participants can view messages" ON public.chat_messages
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM public.chats
-      WHERE chats.id = chat_messages.chat_id
-        AND auth.uid()::text = ANY(chats.participants)
-    )
-  );
-CREATE POLICY "Participants can send messages" ON public.chat_messages
-  FOR INSERT WITH CHECK (
-    auth.uid()::text = sender_id AND
-    EXISTS (
-      SELECT 1 FROM public.chats
-      WHERE chats.id = chat_messages.chat_id
-        AND auth.uid()::text = ANY(chats.participants)
-    )
-  );
-CREATE POLICY "Participants can update reactions/pin" ON public.chat_messages
-  FOR UPDATE USING (
-    EXISTS (
-      SELECT 1 FROM public.chats
-      WHERE chats.id = chat_messages.chat_id
-        AND auth.uid()::text = ANY(chats.participants)
-    )
-  );
+-- ===========================
+-- CREATE POLICIES (clean set)
+-- ===========================
 
--- Calls policies
-CREATE POLICY "Users can view their calls" ON public.calls
-  FOR SELECT USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
-CREATE POLICY "Users can log calls" ON public.calls
-  FOR INSERT WITH CHECK (auth.uid()::text = caller_id);
+-- Users
+CREATE POLICY "users_select" ON public.users FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "users_insert" ON public.users FOR INSERT WITH CHECK (auth.uid()::text = id);
+CREATE POLICY "users_update" ON public.users FOR UPDATE USING (auth.uid()::text = id);
 
--- Call Signals policies
-CREATE POLICY "Users can view their signals" ON public.call_signals
-  FOR SELECT USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
-CREATE POLICY "Callers can create signals" ON public.call_signals
-  FOR INSERT WITH CHECK (auth.uid()::text = caller_id);
-CREATE POLICY "Participants can update signals" ON public.call_signals
-  FOR UPDATE USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
+-- Chats
+CREATE POLICY "chats_select" ON public.chats FOR SELECT USING (auth.uid()::text = ANY(participants));
+CREATE POLICY "chats_insert" ON public.chats FOR INSERT WITH CHECK (auth.uid()::text = ANY(participants));
+CREATE POLICY "chats_update" ON public.chats FOR UPDATE USING (auth.uid()::text = ANY(participants));
+CREATE POLICY "chats_delete" ON public.chats FOR DELETE USING (auth.uid()::text = created_by OR auth.uid()::text = ANY(participants));
 
--- ICE Candidates policies
-CREATE POLICY "Authenticated users can view ice candidates" ON public.ice_candidates
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated users can insert ice candidates" ON public.ice_candidates
-  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+-- Chat Messages
+CREATE POLICY "messages_select" ON public.chat_messages FOR SELECT USING (
+  EXISTS (SELECT 1 FROM public.chats WHERE chats.id = chat_messages.chat_id AND auth.uid()::text = ANY(chats.participants))
+);
+CREATE POLICY "messages_insert" ON public.chat_messages FOR INSERT WITH CHECK (
+  auth.uid()::text = sender_id AND
+  EXISTS (SELECT 1 FROM public.chats WHERE chats.id = chat_messages.chat_id AND auth.uid()::text = ANY(chats.participants))
+);
+CREATE POLICY "messages_update" ON public.chat_messages FOR UPDATE USING (
+  EXISTS (SELECT 1 FROM public.chats WHERE chats.id = chat_messages.chat_id AND auth.uid()::text = ANY(chats.participants))
+);
+-- Allow senders to delete their own messages
+CREATE POLICY "messages_delete" ON public.chat_messages FOR DELETE USING (auth.uid()::text = sender_id);
 
--- Statuses policies
-CREATE POLICY "Authenticated users can view statuses" ON public.statuses
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Users can create own status" ON public.statuses
-  FOR INSERT WITH CHECK (auth.uid()::text = user_id);
-CREATE POLICY "Users can update own status" ON public.statuses
-  FOR UPDATE USING (auth.uid()::text = user_id);
-CREATE POLICY "Users can delete own status" ON public.statuses
-  FOR DELETE USING (auth.uid()::text = user_id);
+-- Calls
+CREATE POLICY "calls_select" ON public.calls FOR SELECT USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
+CREATE POLICY "calls_insert" ON public.calls FOR INSERT WITH CHECK (auth.uid()::text = caller_id);
+CREATE POLICY "calls_update" ON public.calls FOR UPDATE USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
 
--- Communities policies
-CREATE POLICY "Authenticated can view communities" ON public.communities
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated can create communities" ON public.communities
-  FOR INSERT WITH CHECK (auth.uid()::text = created_by);
-CREATE POLICY "Creators can update communities" ON public.communities
-  FOR UPDATE USING (auth.uid()::text = created_by);
-CREATE POLICY "Creators can delete communities" ON public.communities
-  FOR DELETE USING (auth.uid()::text = created_by);
+-- Call Signals
+CREATE POLICY "signals_select" ON public.call_signals FOR SELECT USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
+CREATE POLICY "signals_insert" ON public.call_signals FOR INSERT WITH CHECK (auth.uid()::text = caller_id);
+CREATE POLICY "signals_update" ON public.call_signals FOR UPDATE USING (auth.uid()::text = caller_id OR auth.uid()::text = receiver_id);
 
--- Friend Requests policies
-CREATE POLICY "Users can see their requests" ON public.friend_requests
-  FOR SELECT USING (auth.uid()::text = from_id OR auth.uid()::text = to_id);
-CREATE POLICY "Users can send requests" ON public.friend_requests
-  FOR INSERT WITH CHECK (auth.uid()::text = from_id);
-CREATE POLICY "Recipients can update requests" ON public.friend_requests
-  FOR UPDATE USING (auth.uid()::text = to_id OR auth.uid()::text = from_id);
-CREATE POLICY "Users can delete own requests" ON public.friend_requests
-  FOR DELETE USING (auth.uid()::text = from_id OR auth.uid()::text = to_id);
+-- ICE Candidates
+CREATE POLICY "ice_select" ON public.ice_candidates FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "ice_insert" ON public.ice_candidates FOR INSERT WITH CHECK (auth.role() = 'authenticated');
 
--- Rooms policies
-CREATE POLICY "Authenticated can view rooms" ON public.rooms
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated can create rooms" ON public.rooms
-  FOR INSERT WITH CHECK (auth.uid()::text = owner_id);
-CREATE POLICY "Anyone authenticated can update rooms" ON public.rooms
-  FOR UPDATE USING (auth.role() = 'authenticated');
-CREATE POLICY "Owners can delete rooms" ON public.rooms
-  FOR DELETE USING (auth.uid()::text = owner_id);
+-- Statuses
+CREATE POLICY "statuses_select" ON public.statuses FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "statuses_insert" ON public.statuses FOR INSERT WITH CHECK (auth.uid()::text = user_id);
+CREATE POLICY "statuses_update" ON public.statuses FOR UPDATE USING (auth.uid()::text = user_id);
+CREATE POLICY "statuses_delete" ON public.statuses FOR DELETE USING (auth.uid()::text = user_id);
 
--- Room Participants policies
-CREATE POLICY "Authenticated can view room participants" ON public.room_participants
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Users can join rooms" ON public.room_participants
-  FOR INSERT WITH CHECK (auth.uid()::text = user_id);
-CREATE POLICY "Users can leave rooms" ON public.room_participants
-  FOR DELETE USING (auth.uid()::text = user_id);
+-- Communities
+CREATE POLICY "communities_select" ON public.communities FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "communities_insert" ON public.communities FOR INSERT WITH CHECK (auth.uid()::text = created_by);
+CREATE POLICY "communities_update" ON public.communities FOR UPDATE USING (auth.uid()::text = created_by);
+CREATE POLICY "communities_delete" ON public.communities FOR DELETE USING (auth.uid()::text = created_by);
 
--- Room Messages policies
-CREATE POLICY "Authenticated can view room messages" ON public.room_messages
-  FOR SELECT USING (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated can send room messages" ON public.room_messages
-  FOR INSERT WITH CHECK (auth.uid()::text = sender_id);
+-- Friend Requests
+CREATE POLICY "freq_select" ON public.friend_requests FOR SELECT USING (auth.uid()::text = from_id OR auth.uid()::text = to_id);
+CREATE POLICY "freq_insert" ON public.friend_requests FOR INSERT WITH CHECK (auth.uid()::text = from_id);
+CREATE POLICY "freq_update" ON public.friend_requests FOR UPDATE USING (auth.uid()::text = to_id OR auth.uid()::text = from_id);
+CREATE POLICY "freq_delete" ON public.friend_requests FOR DELETE USING (auth.uid()::text = from_id OR auth.uid()::text = to_id);
+
+-- Rooms
+CREATE POLICY "rooms_select" ON public.rooms FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "rooms_insert" ON public.rooms FOR INSERT WITH CHECK (auth.uid()::text = owner_id);
+CREATE POLICY "rooms_update" ON public.rooms FOR UPDATE USING (auth.role() = 'authenticated');
+CREATE POLICY "rooms_delete" ON public.rooms FOR DELETE USING (auth.uid()::text = owner_id);
+
+-- Room Participants
+CREATE POLICY "rparticipants_select" ON public.room_participants FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "rparticipants_insert" ON public.room_participants FOR INSERT WITH CHECK (auth.uid()::text = user_id);
+CREATE POLICY "rparticipants_delete" ON public.room_participants FOR DELETE USING (auth.uid()::text = user_id);
+CREATE POLICY "rparticipants_update" ON public.room_participants FOR UPDATE USING (auth.uid()::text = user_id);
+
+-- Room Messages
+CREATE POLICY "rmessages_select" ON public.room_messages FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "rmessages_insert" ON public.room_messages FOR INSERT WITH CHECK (auth.uid()::text = sender_id);
 
 -- ===========================
 -- REALTIME SUBSCRIPTIONS
--- Enable realtime for these tables in Supabase Dashboard or via SQL:
 -- ===========================
-
--- Enable Realtime on key tables (run this in Supabase Dashboard -> Database -> Replication)
--- Or run these SQL commands:
 
 ALTER PUBLICATION supabase_realtime ADD TABLE public.rooms;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.room_participants;
@@ -330,11 +373,5 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.calls;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.call_signals;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.ice_candidates;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.friend_requests;
-
--- ===========================
--- INITIAL SEED DATA (optional)
--- ===========================
-
--- Create a sample community
--- INSERT INTO public.communities (name, description, avatar_url, groups_count, created_by)
--- VALUES ('General', 'Welcome to ViaaChat!', 'https://api.dicebear.com/7.x/shapes/svg?seed=general', 1, NULL);
+ALTER PUBLICATION supabase_realtime ADD TABLE public.statuses;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.users;

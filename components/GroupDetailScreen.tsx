@@ -653,23 +653,6 @@ export const GroupDetailScreen: React.FC<GroupDetailScreenProps> = ({ group, con
 
         {selectedMember && <UserProfileModal user={selectedMember} onClose={() => setSelectedMember(null)} onInitiateCall={onInitiateCall} onInitiateChat={onInitiateChat} />}
 
-        <style>{`
-            @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-            .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
-             @keyframes fade-in-down {
-              0% { opacity: 0; transform: translateY(-10px); }
-              100% { opacity: 1; transform: translateY(0); }
-            }
-            .animate-fade-in-down { animation: fade-in-down 0.2s ease-out forwards; }
-            @keyframes fade-in-up {
-                from { opacity: 0; transform: translateY(10px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-            .animate-fade-in-up { animation: fade-in-up 0.2s ease-out forwards; }
-            .emoji-3d {
-                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.2);
-            }
-        `}</style>
     </div>
   );
 };

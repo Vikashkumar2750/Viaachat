@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { SearchBar } from './components/SearchBar';
 import { FilterPills } from './components/FilterPills';
@@ -107,20 +107,30 @@ const App: React.FC = () => {
   const [isSearchingRandomCall, setIsSearchingRandomCall] = useState(false);
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const queueChannelRef = useRef<any>(null); // holds active matchmaking subscription
+
+  // Auto-dismiss toast after 3 seconds
+  useEffect(() => {
+    if (!toastMessage) return;
+    const t = setTimeout(() => setToastMessage(null), 3000);
+    return () => clearTimeout(t);
+  }, [toastMessage]);
 
   // ─── Auth: listen to Supabase auth changes ─────────────────────────────────
   useEffect(() => {
-    // Hard timeout: never stay in loading state longer than 6 seconds
-    const loadingTimeout = setTimeout(() => setLoading(false), 6000);
+    // Hard timeout: never stay in loading state longer than 8 seconds
+    const loadingTimeout = setTimeout(() => setLoading(false), 8000);
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       try {
         if (session?.user) {
-          // Only sync user data on actual sign-in or token refresh, not on every page load
-          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+          // Only call syncUser on actual sign-in events, not every session restore
+          if (event === 'SIGNED_IN') {
             await syncUser(session.user);
           }
 
+          // Fetch profile (works for all events including INITIAL_SESSION & TOKEN_REFRESHED)
           const { data: profile, error: profileError } = await supabase
             .from('users')
             .select('*')
@@ -129,8 +139,8 @@ const App: React.FC = () => {
 
           if (profile && !profileError) {
             setUser(dbToUser(profile));
-          } else if (profileError) {
-            // Profile doesn't exist yet, create it
+          } else if (profileError?.code === 'PGRST116' || !profile) {
+            // Profile missing — create it (new user or anonymous)
             await syncUser(session.user);
             const { data: retryProfile } = await supabase
               .from('users')
@@ -143,8 +153,12 @@ const App: React.FC = () => {
           setUser(null);
         }
       } catch (err) {
-        console.error('Auth state change error:', err);
-        setUser(null);
+        // Auth lock errors are transient — don't crash the app
+        if (!(err as any)?.message?.includes('Lock')) {
+          console.error('Auth state change error:', err);
+        }
+        // Only clear user on explicit sign-out
+        if (event === 'SIGNED_OUT') setUser(null);
       } finally {
         clearTimeout(loadingTimeout);
         setLoading(false);
@@ -157,11 +171,18 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // ─── Presence: update lastSeen every 5 minutes ─────────────────────────────
+  // ─── Presence: update lastSeen immediately + every 60 seconds ───────────────
   useEffect(() => {
     if (!user?.id) return;
-    const interval = setInterval(() => updateUserPresence(user.id), 300000);
-    return () => clearInterval(interval);
+    updateUserPresence(user.id); // immediate on login
+    const interval = setInterval(() => updateUserPresence(user.id), 60000);
+    // Also update on tab focus
+    const onFocus = () => updateUserPresence(user.id);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
   }, [user?.id]);
 
   // ─── Live user profile (blocked users, etc.) ───────────────────────────────
@@ -246,9 +267,27 @@ const App: React.FC = () => {
         const row = payload.new as any;
         const now = Date.now();
         const callTime = new Date(row.timestamp).getTime();
-        if (now - callTime < 30000) {
+        // Only show if call is within 45 seconds (generous window for slow networks)
+        if (now - callTime < 45000) {
           if (user.blockedUserIds?.includes(row.caller_id)) return;
-          const callerContact = contacts.find(c => c.id === row.caller_id);
+          // Try contacts first, then fetch from DB for fresh info
+          let callerContact = contacts.find(c => c.id === row.caller_id);
+          if (!callerContact) {
+            try {
+              const { data: callerData } = await supabase
+                .from('users')
+                .select('id, display_name, photo_url')
+                .eq('id', row.caller_id)
+                .single();
+              if (callerData) {
+                callerContact = {
+                  id: callerData.id,
+                  name: callerData.display_name || 'Unknown Caller',
+                  avatarUrl: callerData.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${callerData.id}`,
+                };
+              }
+            } catch {}
+          }
           setIncomingCall({
             ...dbToCall(row),
             contact: callerContact || {
@@ -266,6 +305,19 @@ const App: React.FC = () => {
         table: 'calls',
         filter: `caller_id=eq.${user.id}`,
       }, () => fetchCalls())
+      // Also watch for updates (missed calls when signal ends)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'call_signals',
+        filter: `receiver_id=eq.${user.id}`,
+      }, async (payload) => {
+        const sig = payload.new as any;
+        if (sig.status === 'ended' || sig.status === 'rejected') {
+          setIncomingCall(null);
+        }
+        fetchCalls();
+      })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
@@ -300,6 +352,16 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!user?.id) return;
 
+    const mapStatus = (s: any) => ({
+      ...s,
+      userId: s.user_id,
+      avatarUrl: s.avatar_url,
+      backgroundColor: s.background_color,
+      contentUrl: s.content_url,
+      isMine: s.user_id === user.id,
+      time: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+
     const fetchData = async () => {
       const yesterday = new Date(Date.now() - 86400000).toISOString();
 
@@ -308,17 +370,7 @@ const App: React.FC = () => {
         supabase.from('communities').select('*').order('created_at', { ascending: false }).limit(20),
       ]);
 
-      if (statusRes.data) {
-        setStatuses(statusRes.data.map(s => ({
-          ...s,
-          userId: s.user_id,
-          avatarUrl: s.avatar_url,
-          backgroundColor: s.background_color,
-          contentUrl: s.content_url,
-          isMine: s.user_id === user.id,
-          time: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        })));
-      }
+      if (statusRes.data) setStatuses(statusRes.data.map(mapStatus));
       if (communityRes.data) {
         setCommunities(communityRes.data.map(c => ({
           ...c,
@@ -331,8 +383,28 @@ const App: React.FC = () => {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 900000);
-    return () => clearInterval(interval);
+
+    // Real-time: new status posted → add to top of list
+    const statusChannel = supabase
+      .channel(`statuses-live-${user.id}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'statuses',
+      }, (payload) => {
+        const s = payload.new as any;
+        setStatuses(prev => [mapStatus(s), ...prev.filter(x => x.id !== s.id)]);
+      })
+      .on('postgres_changes', {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'statuses',
+      }, (payload) => {
+        setStatuses(prev => prev.filter(x => x.id !== (payload.old as any).id));
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(statusChannel); };
   }, [user?.id]);
 
   // ─── Friend Requests: real-time ─────────────────────────────────────────────
@@ -447,7 +519,7 @@ const App: React.FC = () => {
   const handleInitiateCall = async (contact: Contact, isVideo: boolean) => {
     if (!user) return;
     if (user.blockedUserIds?.includes(contact.id)) {
-      alert(`You have blocked ${contact.name}. Unblock them to call.`);
+      setToastMessage(`🚫 You've blocked ${contact.name}. Unblock them to call.`);
       return;
     }
 
@@ -457,15 +529,27 @@ const App: React.FC = () => {
     setActiveTab('Calls');
     setLastCalledUser(contact);
 
+    // Insert call record and use its UUID as the signal ID too
     const { data, error } = await supabase.from('calls').insert({
       caller_id: user.id,
       receiver_id: contact.id,
       type: 'outgoing',
       timestamp: new Date().toISOString(),
       is_video: isVideo,
+      duration: 0,
     }).select().single();
 
     if (error) { handleSupabaseError(error, 'initiate-call'); return; }
+
+    // Pre-create call_signals row so receiver can find it immediately
+    await supabase.from('call_signals').upsert({
+      id: data.id, // Same UUID — links perfectly
+      caller_id: user.id,
+      receiver_id: contact.id,
+      is_video: isVideo,
+      status: 'calling',
+    }, { onConflict: 'id' });
+
     setActiveCall({ contact, isVideo, callId: data.id, isCaller: true });
   };
 
@@ -516,7 +600,8 @@ const App: React.FC = () => {
       timestamp: new Date().toISOString(),
     }, { onConflict: 'from_id,to_id' });
     if (error) { handleSupabaseError(error, 'send-friend-request'); return; }
-    alert(`Friend request sent to ${toName}!`);
+    // Show non-blocking toast instead of alert
+    setToastMessage(`Friend request sent to ${toName}! 🤝`);
   };
 
   const handleAcceptFriendRequest = async (request: FriendRequest) => {
@@ -531,62 +616,155 @@ const App: React.FC = () => {
     await supabase.from('friend_requests').delete().eq('id', request.id);
   };
 
+  // ─── Remove self from queue and cancel subscription ─────────────────────────
+  const leaveQueue = useCallback(async () => {
+    if (queueChannelRef.current) {
+      await supabase.removeChannel(queueChannelRef.current);
+      queueChannelRef.current = null;
+    }
+    if (user) {
+      await supabase.from('call_queue').delete().eq('user_id', user.id);
+    }
+  }, [user]);
+
+  // ─── Auto-start a matched call (no accept dialog) ────────────────────────────
+  const startMatchedCall = useCallback((partnerId: string, partnerName: string, partnerAvatar: string, callId: string, isVideo: boolean, myId: string) => {
+    setIsSearchingRandomCall(false);
+    setSearchProgress(100);
+    // Deterministic roles: lower user ID is always the caller
+    const isCaller = myId < partnerId;
+    setActiveCall({
+      contact: {
+        id: partnerId,
+        name: partnerName,
+        avatarUrl: partnerAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${partnerId}`,
+      },
+      isVideo,
+      callId,
+      isCaller,
+    });
+  }, []);
+
   const handleRandomCall = async (isVideo: boolean) => {
     if (!user) return;
+
+    // Cancel any previous search first
+    await leaveQueue();
+
     setIsSearchingRandomCall(true);
     setSearchProgress(0);
     setSearchError(null);
 
+    // Animate progress bar smoothly while searching
     const progressInterval = setInterval(() => {
-      setSearchProgress(prev => prev >= 95 ? prev : prev + Math.random() * 5);
-    }, 200);
+      setSearchProgress(prev => prev >= 90 ? prev : prev + Math.random() * 3);
+    }, 300);
 
     try {
-      const tenMinutesAgo = new Date(Date.now() - 600000).toISOString();
-      const { data } = await supabase
-        .from('users')
-        .select('id, display_name, photo_url')
-        .neq('id', user.id)
-        .gte('last_seen', tenMinutesAgo)
-        .limit(20);
+      // ── Step 1: Add self to the matchmaking queue ────────────────────────────
+      const { error: upsertErr } = await supabase.from('call_queue').upsert({
+        user_id: user.id,
+        user_name: user.displayName,
+        user_avatar: user.photoURL,
+        is_video: isVideo,
+        searching_since: new Date().toISOString(),
+        matched_with: null,
+        matched_name: null,
+        matched_avatar: null,
+        call_id: null,
+      }, { onConflict: 'user_id' });
 
-      const available = (data || []).filter(u => !user.blockedUserIds?.includes(u.id));
-
-      if (available.length > 0) {
-        setSearchProgress(100);
-        const randomUser = available[Math.floor(Math.random() * available.length)];
-        handleInitiateCall({
-          id: randomUser.id,
-          name: randomUser.display_name,
-          avatarUrl: randomUser.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${randomUser.id}`,
-        }, isVideo);
-        setTimeout(() => setIsSearchingRandomCall(false), 500);
-      } else {
-        const { data: anyUsers } = await supabase
-          .from('users')
-          .select('id, display_name, photo_url')
-          .neq('id', user.id)
-          .limit(10);
-
-        if (anyUsers && anyUsers.length > 0) {
-          setSearchProgress(100);
-          const randomUser = anyUsers[Math.floor(Math.random() * anyUsers.length)];
-          handleInitiateCall({
-            id: randomUser.id,
-            name: randomUser.display_name,
-            avatarUrl: randomUser.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${randomUser.id}`,
-          }, isVideo);
-          setTimeout(() => setIsSearchingRandomCall(false), 500);
-        } else {
-          setSearchError('No other users online. Try again later!');
-          setSearchProgress(0);
-        }
+      if (upsertErr) {
+        // call_queue table may not exist yet — show migration hint
+        setSearchError('Queue table not found. Run the updated schema.sql in Supabase first.');
+        clearInterval(progressInterval);
+        setIsSearchingRandomCall(false);
+        return;
       }
-    } catch (err) {
-      setSearchError('Something went wrong. Please try again.');
-    } finally {
+
+      // ── Step 2: Look for another user already waiting ────────────────────────
+      const { data: waiting } = await supabase
+        .from('call_queue')
+        .select('user_id, user_name, user_avatar, is_video')
+        .neq('user_id', user.id)
+        .is('matched_with', null)
+        .order('searching_since', { ascending: true })
+        .limit(1)
+        .single();
+
+      if (waiting) {
+        // ── Found a match! Create the call and update both queue rows ──────────
+        const callId = crypto.randomUUID();
+
+        // Mark both users as matched simultaneously
+        await Promise.all([
+          supabase.from('call_queue').update({
+            matched_with: waiting.user_id,
+            matched_name: waiting.user_name,
+            matched_avatar: waiting.user_avatar,
+            call_id: callId,
+          }).eq('user_id', user.id),
+          supabase.from('call_queue').update({
+            matched_with: user.id,
+            matched_name: user.displayName,
+            matched_avatar: user.photoURL,
+            call_id: callId,
+          }).eq('user_id', waiting.user_id),
+        ]);
+
+        clearInterval(progressInterval);
+        await leaveQueue();
+
+        // Auto-start call instantly — no accept modal
+        startMatchedCall(waiting.user_id, waiting.user_name, waiting.user_avatar, callId, isVideo, user.id);
+        return;
+      }
+
+      // ── Step 3: No one waiting — subscribe and wait for a match ─────────────
       clearInterval(progressInterval);
+
+      const queueCh = supabase
+        .channel(`queue-match-${user.id}`)
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'call_queue',
+          filter: `user_id=eq.${user.id}`,
+        }, async (payload) => {
+          const row = payload.new as any;
+          if (row.matched_with && row.call_id) {
+            // Got matched by someone else — auto-start call
+            await leaveQueue();
+            startMatchedCall(row.matched_with, row.matched_name || 'User', row.matched_avatar, row.call_id, isVideo, user.id);
+          }
+        })
+        .subscribe();
+
+      queueChannelRef.current = queueCh;
+
+      // Auto-cancel after 60 seconds with a friendly message
+      setTimeout(async () => {
+        if (queueChannelRef.current === queueCh) {
+          await leaveQueue();
+          setIsSearchingRandomCall(false);
+          setSearchProgress(0);
+          setSearchError('No one found nearby. Try again in a moment!');
+        }
+      }, 60000);
+
+    } catch (err) {
+      clearInterval(progressInterval);
+      setSearchError('Something went wrong. Please try again.');
+      setIsSearchingRandomCall(false);
+      await leaveQueue();
     }
+  };
+
+  const handleCancelRandomCall = async () => {
+    await leaveQueue();
+    setIsSearchingRandomCall(false);
+    setSearchProgress(0);
+    setSearchError(null);
   };
 
   const handleLastCalledChat = () => {
@@ -618,13 +796,25 @@ const App: React.FC = () => {
       setActiveCall({
         contact: incomingCall.contact!,
         isVideo: incomingCall.isVideo,
-        callId: incomingCall.id,
+        callId: incomingCall.id, // This is call_signals.id (same UUID as calls.id)
         isCaller: false,
       });
       setIncomingCall(null);
     }
   };
-  const handleRejectCall = () => setIncomingCall(null);
+  const handleRejectCall = async () => {
+    if (incomingCall) {
+      // Mark signal as rejected so caller UI updates immediately
+      await supabase.from('call_signals')
+        .update({ status: 'rejected' })
+        .eq('id', incomingCall.id);
+      // Mark call as missed for the caller
+      await supabase.from('calls')
+        .update({ type: 'missed' })
+        .eq('id', incomingCall.id);
+    }
+    setIncomingCall(null);
+  };
 
   const handleSimulateCall = () => {
     if (contacts.length > 0) {
@@ -711,10 +901,6 @@ const App: React.FC = () => {
             Need help? Check the <span className="text-emerald-500 font-bold">walkthrough.md</span> in the project artifacts
           </p>
         </div>
-        <style>{`
-          @keyframes fade-in { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-          .animate-fade-in { animation: fade-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        `}</style>
       </div>
     );
   }
@@ -799,40 +985,52 @@ const App: React.FC = () => {
   return (
     <div className="relative h-screen w-screen bg-gray-50 flex flex-col font-sans max-w-md mx-auto shadow-2xl overflow-hidden">
 
-      {/* Random call search overlay */}
+      {/* Matchmaking search overlay */}
       {isSearchingRandomCall && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex flex-col items-center justify-center animate-fade-in p-6 text-center">
-          <div className="relative mb-8">
-            <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping" />
-            <div className="relative bg-emerald-500 p-6 rounded-full shadow-2xl shadow-emerald-500/40">
-              <PhoneCall size={48} className="text-white animate-bounce" />
+        <div className="fixed inset-0 bg-gradient-to-b from-slate-950 via-emerald-950 to-slate-950 z-[100] flex flex-col items-center justify-center animate-fade-in p-6 text-center">
+          {/* Radar animation */}
+          <div className="relative mb-10 w-36 h-36 flex items-center justify-center">
+            <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20 animate-ping" style={{ animationDuration: '1.5s' }} />
+            <div className="absolute inset-4 rounded-full border-2 border-emerald-500/30 animate-ping" style={{ animationDuration: '2s' }} />
+            <div className="absolute inset-8 rounded-full border-2 border-emerald-500/40 animate-ping" style={{ animationDuration: '2.5s' }} />
+            <div className="relative bg-gradient-to-br from-emerald-500 to-teal-500 p-5 rounded-full shadow-2xl shadow-emerald-500/40">
+              <PhoneCall size={40} className="text-white" />
             </div>
           </div>
-          <h2 className="text-2xl font-bold text-white mb-2">
-            {searchError ? 'No one found' : 'Finding someone...'}
+
+          <h2 className="text-2xl font-black text-white mb-2 tracking-tight">
+            {searchError ? '😔 No match found' : '🔍 Finding a partner...'}
           </h2>
-          <p className="text-emerald-100 text-sm max-w-[240px] mb-8">
-            {searchError || "We're searching for an active user. Please wait."}
+          <p className="text-emerald-300/80 text-sm max-w-[260px] mb-8 leading-relaxed">
+            {searchError
+              ? searchError
+              : 'Waiting for another user to also start searching. You\'ll be connected automatically!'}
           </p>
+
           {!searchError && (
-            <>
-              <div className="w-full max-w-xs bg-white/10 rounded-full h-2 mb-4 overflow-hidden">
+            <div className="w-full max-w-xs mb-6">
+              <div className="flex justify-between text-xs text-emerald-400/60 font-bold uppercase tracking-widest mb-2">
+                <span>Searching</span>
+                <span>Auto-connects when matched</span>
+              </div>
+              <div className="w-full bg-white/5 rounded-full h-1.5 overflow-hidden">
                 <div
-                  className="bg-emerald-500 h-full transition-all duration-300 ease-out"
+                  className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-500"
                   style={{ width: `${searchProgress}%` }}
                 />
               </div>
-              <p className="text-white font-bold text-lg mb-8">{Math.round(searchProgress)}%</p>
-            </>
+            </div>
           )}
+
           <button
-            onClick={() => setIsSearchingRandomCall(false)}
-            className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-2xl font-bold transition-all border border-white/20"
+            onClick={handleCancelRandomCall}
+            className="px-8 py-3.5 bg-white/10 hover:bg-white/20 text-white rounded-2xl font-bold transition-all border border-white/10 active:scale-95"
           >
-            {searchError ? 'Close' : 'Cancel Search'}
+            {searchError ? 'Close' : 'Cancel'}
           </button>
         </div>
       )}
+
 
       {/* Active call overlay */}
       {activeCall && <CallScreen call={activeCall} onEndCall={handleEndCall} />}
@@ -883,7 +1081,12 @@ const App: React.FC = () => {
         <div className={`h-full flex flex-col ${activeCall || incomingCall ? 'blur-sm' : ''}`}>
           <Header onProfileClick={() => setIsProfileOpen(prev => !prev)} user={user} />
           {isProfileOpen && (
-            <ProfileDashboard user={user} onClose={() => setIsProfileOpen(false)} onSimulateCall={handleSimulateCall} />
+            <ProfileDashboard
+              user={user}
+              onClose={() => setIsProfileOpen(false)}
+              onSimulateCall={handleSimulateCall}
+              onUserUpdated={(updates) => setUser(prev => prev ? { ...prev, ...updates } : prev)}
+            />
           )}
           <main className="flex-1 overflow-y-auto pb-20">
             {/* Incoming friend requests banner */}
@@ -945,10 +1148,13 @@ const App: React.FC = () => {
         />
       )}
 
-      <style>{`
-        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-        .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
-      `}</style>
+      {/* Global Toast */}
+      {toastMessage && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[999] bg-slate-800 text-white px-5 py-3 rounded-2xl shadow-2xl text-sm font-bold animate-fade-in max-w-[90vw] text-center pointer-events-none">
+          {toastMessage}
+        </div>
+      )}
+
     </div>
   );
 };

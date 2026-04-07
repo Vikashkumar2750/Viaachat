@@ -70,15 +70,6 @@ export const Fab: React.FC<FabProps> = ({
         {isOpen ? <X size={28} /> : <Plus size={28} />}
       </button>
 
-      <style>{`
-        @keyframes slide-up {
-          from { transform: translateY(20px); opacity: 0; }
-          to { transform: translateY(0); opacity: 1; }
-        }
-        .animate-slide-up {
-          animation: slide-up 0.2s ease-out forwards;
-        }
-      `}</style>
     </div>
   );
 };

@@ -193,7 +193,15 @@ export const UpdatesScreen: React.FC<UpdatesScreenProps> = ({ statuses, user, co
   const [viewingStatus, setViewingStatus] = useState<Status | null>(null);
   const [isAddingStatus, setIsAddingStatus] = useState(false);
   const [isComposingText, setIsComposingText] = useState(false);
+  const [statusToast, setStatusToast] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const toastTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = (msg: string) => {
+    setStatusToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setStatusToast(null), 3000);
+  };
   
   // Filter statuses to only show mine and my contacts'
   const contactIds = contacts.map(c => c.id);
@@ -225,7 +233,7 @@ export const UpdatesScreen: React.FC<UpdatesScreenProps> = ({ statuses, user, co
       });
       setIsComposingText(false);
     } catch (error) {
-      alert('Failed to post status. Please try again.');
+      showToast('Failed to post status. Please try again.');
     } finally {
       setIsAddingStatus(false);
     }
@@ -234,8 +242,8 @@ export const UpdatesScreen: React.FC<UpdatesScreenProps> = ({ statuses, user, co
   const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user) return;
-    if (file.size > 800000) {
-      alert('Image is too large. Please select an image smaller than 800KB.');
+    if (file.size > 2000000) { // 2MB max
+      showToast('Image too large. Please use an image under 2MB.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
@@ -252,18 +260,30 @@ export const UpdatesScreen: React.FC<UpdatesScreenProps> = ({ statuses, user, co
           timestamp: new Date().toISOString(),
           viewed: false,
         });
-        if (error) alert('Failed to upload image status.');
+        if (error) showToast('Failed to upload image status.');
+        else showToast('Status posted! 📸');
         setIsAddingStatus(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
       };
+      reader.onerror = () => {
+        showToast('Could not read image file.');
+        setIsAddingStatus(false);
+      };
       reader.readAsDataURL(file);
     } catch {
+      showToast('Failed to post image status.');
       setIsAddingStatus(false);
     }
   };
 
   return (
     <div className="h-full bg-white flex flex-col">
+      {/* Toast */}
+      {statusToast && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[999] bg-slate-800 text-white px-5 py-3 rounded-2xl shadow-2xl text-sm font-bold animate-fade-in max-w-[90vw] text-center pointer-events-none">
+          {statusToast}
+        </div>
+      )}
       {viewingStatus && <StatusViewer status={viewingStatus} onClose={() => setViewingStatus(null)} />}
       {isComposingText && <StatusComposer user={user} onClose={() => setIsComposingText(false)} onPost={handlePostTextStatus} isLoading={isAddingStatus} />}
       

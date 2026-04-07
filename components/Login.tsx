@@ -11,49 +11,51 @@ export const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loadingGoogle, setLoadingGoogle] = useState(false);
+  const [loadingGuest, setLoadingGuest] = useState(false);
+  const [loadingEmail, setLoadingEmail] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleGoogleLogin = async () => {
-    setLoading(true);
+    setLoadingGoogle(true);
     setError(null);
     try {
       await signInWithGoogle();
       // Supabase redirects back to the app after OAuth
     } catch (err: any) {
       setError(err.message || 'Google sign-in failed.');
-      setLoading(false);
+      setLoadingGoogle(false);
     }
   };
 
   const handleGuestLogin = async () => {
-    setLoading(true);
+    setLoadingGuest(true);
     setError(null);
     try {
       await signInAsGuest();
     } catch (err: any) {
       setError(err.message || 'Guest sign-in failed. Anonymous auth may not be enabled in Supabase.');
-      setLoading(false);
+      setLoadingGuest(false);
     }
   };
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) return;
-    setLoading(true);
+    setLoadingEmail(true);
     setError(null);
     try {
       await signInWithEmail(email, password);
     } catch (err: any) {
       setError(err.message || 'Login failed.');
-      setLoading(false);
+      setLoadingEmail(false);
     }
   };
 
   const handleEmailSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password || !displayName) return;
-    setLoading(true);
+    setLoadingEmail(true);
     setError(null);
     try {
       await signUpWithEmail(email, password, displayName);
@@ -61,7 +63,7 @@ export const Login: React.FC = () => {
     } catch (err: any) {
       setError(err.message || 'Sign-up failed.');
     } finally {
-      setLoading(false);
+      setLoadingEmail(false);
     }
   };
 
@@ -96,10 +98,10 @@ export const Login: React.FC = () => {
             {/* Google Sign In */}
             <button
               onClick={handleGoogleLogin}
-              disabled={loading}
+              disabled={loadingGoogle}
               className="w-full bg-white text-gray-900 font-bold py-4 px-6 rounded-2xl flex items-center justify-center gap-3 hover:bg-gray-100 transition-all shadow-xl active:scale-95 disabled:opacity-70"
             >
-              {loading ? (
+              {loadingGoogle ? (
                 <Loader2 size={20} className="animate-spin" />
               ) : (
                 <svg width="20" height="20" viewBox="0 0 24 24">
@@ -124,11 +126,11 @@ export const Login: React.FC = () => {
             {/* Guest */}
             <button
               onClick={handleGuestLogin}
-              disabled={loading}
+              disabled={loadingGuest}
               className="w-full bg-transparent text-white/60 font-medium py-3 px-6 rounded-2xl flex items-center justify-center gap-3 hover:text-white/90 transition-all active:scale-95 disabled:opacity-50"
             >
-              <UserCircle size={18} />
-              Continue as Guest
+              {loadingGuest ? <Loader2 size={18} className="animate-spin" /> : <UserCircle size={18} />}
+              {loadingGuest ? 'Signing in...' : 'Continue as Guest'}
             </button>
 
             {error && (
@@ -205,10 +207,10 @@ export const Login: React.FC = () => {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loadingEmail}
               className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-black py-4 rounded-2xl shadow-xl shadow-emerald-500/20 hover:opacity-90 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {loading ? <Loader2 size={20} className="animate-spin" /> : null}
+              {loadingEmail ? <Loader2 size={20} className="animate-spin" /> : null}
               {mode === 'email-login' ? 'Sign In' : 'Create Account'}
             </button>
 
