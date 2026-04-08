@@ -35,7 +35,7 @@ const RTCServers: RTCConfiguration = {
     },
     // Metered.ca free STUN
     { urls: 'stun:stun.relay.metered.ca:80' },
-    // Twilio-style free STUN  
+    // Twilio-style free STUN
     { urls: ['stun:global.stun.twilio.com:3478'] },
   ],
   iceCandidatePoolSize: 16,
@@ -102,10 +102,11 @@ function useRingTone(active: boolean) {
 
   const playRing = useCallback(() => {
     try {
-      if (!contextRef.current) {
+      if (!contextRef.current || contextRef.current.state === 'closed') {
         contextRef.current = new AudioContext();
       }
       const ctx = contextRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
       oscillator.connect(gainNode);
@@ -124,6 +125,11 @@ function useRingTone(active: boolean) {
   useEffect(() => {
     if (!active) {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      // Close context when ring stops to avoid the "closed context" warning
+      if (contextRef.current) {
+        contextRef.current.close().catch(() => {});
+        contextRef.current = null;
+      }
       return;
     }
     playRing();
@@ -148,6 +154,10 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  // ── KEY FIX: Dedicated audio element always rendered ─────────────────────────
+  // For voice calls, remoteVideoRef is NOT in the DOM, so we need a separate
+  // <audio> element that is always mounted to play remote audio.
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
@@ -207,6 +217,11 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
 
+    // Silence the remote audio element
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
+
     // Close peer connection
     try { pcRef.current?.close(); } catch {}
     pcRef.current = null;
@@ -220,7 +235,6 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     let mounted = true;
 
     const startCall = async () => {
-      // StrictMode guard: if cleanup already ran, don't start again
       if (!mounted) return;
       try {
         // Get user media
@@ -240,7 +254,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         let stream: MediaStream;
         try {
           stream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch (mediaErr) {
+        } catch {
           // Fallback: try audio only
           try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -249,7 +263,6 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           }
         }
 
-        // Abort if unmounted during async getUserMedia
         if (!mounted) {
           stream.getTracks().forEach(t => t.stop());
           return;
@@ -267,14 +280,30 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         // Add tracks
         stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-        // Handle remote tracks
+        // ── KEY FIX: ontrack handler ───────────────────────────────────────────
+        // For VOICE calls: remoteVideoRef.current is NULL (video element not rendered)
+        // We must always use remoteAudioRef for audio output.
+        // For VIDEO calls: also connect to the video element.
         pc.ontrack = (event) => {
-          if (remoteVideoRef.current && event.streams[0]) {
-            remoteVideoRef.current.srcObject = event.streams[0];
-            setCallStatus('Connected');
-            callStartTime.current = Date.now();
-            setIsReconnecting(false);
+          const remoteStream = event.streams[0];
+          if (!remoteStream) return;
+
+          // Always attach to the hidden audio element — ensures audio plays
+          // for BOTH voice and video calls
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteStream;
+            remoteAudioRef.current.play().catch(() => {});
           }
+
+          // Also attach to video element for video calls
+          if (call.isVideo && remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = remoteStream;
+          }
+
+          setCallStatus('Connected');
+          if (!callStartTime.current) callStartTime.current = Date.now();
+          setIsReconnecting(false);
+          setConnectionError('');
         };
 
         // ICE connection state monitoring
@@ -327,18 +356,18 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
         if (call.isCaller) {
           // ── CALLER FLOW ──────────────────────────────────────────────────
-          // Ensure signal doc exists
+          const myUserId = (await supabase.auth.getUser()).data.user?.id || '';
+
           await supabase.from('call_signals').upsert({
             id: call.callId,
-            caller_id: (await supabase.auth.getUser()).data.user?.id || '',
+            caller_id: myUserId,
             receiver_id: call.contact.id,
             is_video: call.isVideo,
             status: 'calling',
           }, { onConflict: 'id' });
 
-          if (!mounted) return; // abort if unmounted during DB call
+          if (!mounted) return;
 
-          // Create local offer — guard against closed PC (StrictMode double-invoke)
           if (pc.signalingState === 'closed') return;
           const offerDesc = await pc.createOffer({
             offerToReceiveAudio: true,
@@ -403,34 +432,57 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
         } else {
           // ── RECEIVER FLOW ────────────────────────────────────────────────
-          setCallStatus('Connecting...');
+          // ── KEY FIX: Increase polling retries from 5×800ms (4s) to 15×1500ms (22.5s)
+          // The caller often takes >4s: microphone permission dialog + SDP creation
+          setCallStatus('Waiting for call signal...');
 
-          // Fetch offer with retry
           let signalData: any = null;
-          for (let attempt = 0; attempt < 5; attempt++) {
+
+          // Subscribe to realtime updates FIRST so we don't miss the offer
+          const offerWaitCh = supabase
+            .channel(`offer-wait-${call.callId}`)
+            .on('postgres_changes', {
+              event: 'UPDATE',
+              schema: 'public',
+              table: 'call_signals',
+              filter: `id=eq.${call.callId}`,
+            }, async (payload) => {
+              if (!mounted || signalData) return;
+              const incoming = payload.new as any;
+              if (incoming.offer && !signalData) {
+                signalData = incoming;
+              }
+            })
+            .subscribe();
+          channelsRef.current.push(offerWaitCh);
+
+          // Poll alongside realtime subscription (belt-and-suspenders)
+          for (let attempt = 0; attempt < 15; attempt++) {
             if (!mounted) return;
+            if (signalData) break; // realtime already got it
             const { data } = await supabase
               .from('call_signals')
               .select('offer, status')
               .eq('id', call.callId)
               .single();
             if (data?.offer) { signalData = data; break; }
-            await new Promise(r => setTimeout(r, 800));
+            if (data?.status === 'ended') {
+              setCallStatus('Missed Call');
+              setTimeout(onEndCall, 1500);
+              return;
+            }
+            await new Promise(r => setTimeout(r, 1500));
           }
 
           if (!mounted) return;
 
           if (!signalData?.offer) {
             setCallStatus('Call Failed');
-            setConnectionError('Could not fetch call signal.');
+            setConnectionError('Could not fetch call signal. Caller may have cancelled.');
             return;
           }
 
-          if (signalData.status === 'ended') {
-            setCallStatus('Missed Call');
-            setTimeout(onEndCall, 1500);
-            return;
-          }
+          setCallStatus('Connecting...');
 
           try {
             if (pc.signalingState === 'closed') return;
@@ -495,7 +547,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         if (!mounted) return;
         console.error('Call setup error:', err);
         setCallStatus('Call Failed');
-        setConnectionError('Could not start call. Check permissions.');
+        setConnectionError('Could not start call. Check mic/camera permissions.');
       }
     };
 
@@ -539,13 +591,59 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     }
   };
 
-  const handleToggleSpeaker = () => setIsSpeakerOn(p => !p);
+  // ── KEY FIX: Speaker toggle actually routes audio ────────────────────────────
+  // Uses setSinkId API to switch between earpiece (default) and speaker.
+  // Falls back gracefully if the browser doesn't support it (e.g. iOS Safari).
+  const handleToggleSpeaker = async () => {
+    const nextState = !isSpeakerOn;
+    setIsSpeakerOn(nextState);
+
+    const audioEl = remoteAudioRef.current;
+    if (!audioEl) return;
+
+    // setSinkId is supported in Chrome/Edge on desktop and Android Chrome
+    if ('setSinkId' in HTMLAudioElement.prototype) {
+      try {
+        if (nextState) {
+          // Get all audio output devices and find the best speaker option
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const outputs = devices.filter(d => d.kind === 'audiooutput');
+          // Prefer: communications > speakerphone > anything that's not default earpiece
+          const speaker =
+            outputs.find(d => d.label.toLowerCase().includes('speaker')) ||
+            outputs.find(d => d.deviceId !== 'default' && d.deviceId !== '') ||
+            outputs[0];
+          if (speaker) {
+            await (audioEl as any).setSinkId(speaker.deviceId);
+          }
+        } else {
+          // Revert to system default (usually earpiece on mobile)
+          await (audioEl as any).setSinkId('default');
+        }
+      } catch {
+        // setSinkId failed — permission denied or device not found
+        // Audio still plays, just can't switch output
+      }
+    }
+    // Note: iOS Safari doesn't support setSinkId at all.
+    // The button still shows visually but has no effect on iOS.
+  };
 
   const isConnected = callStatus === 'Connected';
   const isFailed = callStatus === 'Call Failed' || callStatus === 'Ended';
 
   return (
     <div className="fixed inset-0 bg-slate-950 z-50 flex flex-col items-center text-white overflow-hidden">
+
+      {/* ── Hidden audio element — ALWAYS RENDERED ───────────────────────────
+           This is the key fix for voice calls. When call.isVideo is false,
+           remoteVideoRef is not bound to any DOM element (the video element
+           only renders in the video branch below). This hidden <audio> element
+           is always in the DOM and always receives the remote MediaStream,
+           ensuring audio plays for BOTH voice and video calls.
+      ─────────────────────────────────────────────────────────────────────── */}
+      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+
       {/* Background */}
       <div className="absolute inset-0 z-0">
         {call.isVideo ? (

@@ -628,11 +628,28 @@ const App: React.FC = () => {
   }, [user]);
 
   // ─── Auto-start a matched call (no accept dialog) ────────────────────────────
-  const startMatchedCall = useCallback((partnerId: string, partnerName: string, partnerAvatar: string, callId: string, isVideo: boolean, myId: string) => {
+  const startMatchedCall = useCallback(async (partnerId: string, partnerName: string, partnerAvatar: string, callId: string, isVideo: boolean, myId: string) => {
     setIsSearchingRandomCall(false);
     setSearchProgress(100);
     // Deterministic roles: lower user ID is always the caller
     const isCaller = myId < partnerId;
+
+    // ── KEY FIX: Insert a calls row so the WebRTC signaling has a valid anchor
+    //    and call history works. Both users upsert: only one insert wins (no dup).
+    try {
+      await supabase.from('calls').upsert({
+        id: callId,
+        caller_id: isCaller ? myId : partnerId,
+        receiver_id: isCaller ? partnerId : myId,
+        type: 'outgoing',
+        timestamp: new Date().toISOString(),
+        is_video: isVideo,
+        duration: 0,
+      }, { onConflict: 'id' });
+    } catch {
+      // non-fatal — call can still proceed without a history row
+    }
+
     setActiveCall({
       contact: {
         id: partnerId,
@@ -644,6 +661,7 @@ const App: React.FC = () => {
       isCaller,
     });
   }, []);
+
 
   const handleRandomCall = async (isVideo: boolean) => {
     if (!user) return;

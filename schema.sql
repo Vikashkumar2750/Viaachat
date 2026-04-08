@@ -221,6 +221,7 @@ ALTER TABLE public.friend_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.call_queue ENABLE ROW LEVEL SECURITY;
 
 -- ===========================
 -- DROP OLD CONFLICTING POLICIES (safe to ignore errors)
@@ -360,6 +361,12 @@ CREATE POLICY "rparticipants_update" ON public.room_participants FOR UPDATE USIN
 CREATE POLICY "rmessages_select" ON public.room_messages FOR SELECT USING (auth.role() = 'authenticated');
 CREATE POLICY "rmessages_insert" ON public.room_messages FOR INSERT WITH CHECK (auth.uid()::text = sender_id);
 
+-- Call Queue
+CREATE POLICY "queue_select" ON public.call_queue FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "queue_insert" ON public.call_queue FOR INSERT WITH CHECK (auth.uid()::text = user_id);
+CREATE POLICY "queue_update" ON public.call_queue FOR UPDATE USING (auth.role() = 'authenticated');
+CREATE POLICY "queue_delete" ON public.call_queue FOR DELETE USING (auth.uid()::text = user_id);
+
 -- ===========================
 -- REALTIME SUBSCRIPTIONS
 -- ===========================
@@ -375,3 +382,4 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.ice_candidates;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.friend_requests;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.statuses;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.users;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.call_queue;
