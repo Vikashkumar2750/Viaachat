@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import {
-  Phone, Video, ArrowDownLeft, ArrowUpRight, PhoneCall,
-  ShieldAlert, ShieldCheck, Clock, Shuffle, Mic,
+  Phone, Video, ArrowDownLeft, ArrowUpRight, PhoneCall, PhoneOff,
+  ShieldAlert, ShieldCheck, Clock, Shuffle, Mic, UserPlus, Lock,
 } from 'lucide-react';
+
 import type { Call, Contact } from '../types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -39,10 +40,12 @@ const formatDuration = (seconds?: number): string => {
 const CallLogItem: React.FC<{
   call: Call;
   contacts: Contact[];
+  isFriend: boolean;
   onCall: (contact: Contact, isVideo: boolean) => void;
+  onAddFriend: (contact: Contact) => void;
   isBlocked: boolean;
   onToggleBlock: (id: string) => void;
-}> = ({ call, contacts, onCall, isBlocked, onToggleBlock }) => {
+}> = ({ call, contacts, isFriend, onCall, onAddFriend, isBlocked, onToggleBlock }) => {
   const otherId = call.callerId === contacts[0]?.id ? call.receiverId : call.callerId;
   const contact = contacts.find(c => c.id === (call.type === 'outgoing' ? call.receiverId : call.callerId))
     || call.contact
@@ -99,21 +102,48 @@ const CallLogItem: React.FC<{
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
-          onClick={() => onToggleBlock(contact.id)}
-          className={`p-2 rounded-xl transition-all ${isBlocked ? 'text-emerald-500 hover:bg-emerald-50' : 'text-gray-400 hover:bg-red-50 hover:text-red-500'}`}
-          title={isBlocked ? 'Unblock' : 'Block'}
-        >
-          {isBlocked ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />}
-        </button>
-        <button
-          onClick={() => !isBlocked && onCall(contact, call.isVideo)}
-          disabled={isBlocked}
-          className={`p-2.5 rounded-xl transition-all ${isBlocked ? 'text-gray-200 cursor-not-allowed' : 'text-emerald-600 hover:bg-emerald-50'}`}
-        >
-          {call.isVideo ? <Video size={18} /> : <Phone size={18} />}
-        </button>
+      <div className="flex items-center gap-1">
+        {isBlocked ? (
+          <button
+            onClick={() => onToggleBlock(contact.id)}
+            className="p-2 rounded-xl text-emerald-500 hover:bg-emerald-50 transition-all"
+            title="Unblock"
+          >
+            <ShieldCheck size={17} />
+          </button>
+        ) : isFriend ? (
+          // ── Friend: show call + block buttons ──────────────────────────────
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => onToggleBlock(contact.id)}
+              className="p-2 rounded-xl text-gray-400 hover:bg-red-50 hover:text-red-500 transition-all"
+              title="Block"
+            >
+              <ShieldAlert size={17} />
+            </button>
+            <button
+              onClick={() => onCall(contact, call.isVideo)}
+              className="p-2.5 rounded-xl text-emerald-600 hover:bg-emerald-50 transition-all"
+            >
+              {call.isVideo ? <Video size={18} /> : <Phone size={18} />}
+            </button>
+          </div>
+        ) : (
+          // ── Stranger (post-random-call): lock icon + Add Friend ──────────
+          <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex items-center gap-1 text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-1 rounded-full">
+              <Lock size={9} />
+              Friends only
+            </div>
+            <button
+              onClick={() => onAddFriend(contact)}
+              className="p-2 rounded-xl text-emerald-500 hover:bg-emerald-50 transition-all"
+              title="Send friend request to call again"
+            >
+              <UserPlus size={17} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -181,8 +211,10 @@ const SectionLabel: React.FC<{ label: string; count?: number }> = ({ label, coun
 interface CallsScreenProps {
   calls: Call[];
   contacts: Contact[];
+  friendUserIds: Set<string>;
   onInitiateCall: (contact: Contact, isVideo: boolean) => void;
   onRandomCall: (isVideo: boolean) => void;
+  onSendFriendRequest: (id: string, name: string, avatar: string) => void;
   blockedUserIds: string[];
   onToggleBlock: (id: string) => void;
 }
@@ -190,8 +222,10 @@ interface CallsScreenProps {
 export const CallsScreen: React.FC<CallsScreenProps> = ({
   calls,
   contacts,
+  friendUserIds,
   onInitiateCall,
   onRandomCall,
+  onSendFriendRequest,
   blockedUserIds,
   onToggleBlock,
 }) => {
@@ -259,16 +293,23 @@ export const CallsScreen: React.FC<CallsScreenProps> = ({
           <>
             <SectionLabel label="Recent" count={filteredCalls.length} />
             <div className="bg-white rounded-2xl mx-4 mb-4 overflow-hidden border border-gray-100 shadow-sm divide-y divide-gray-50">
-              {filteredCalls.map(call => (
-                <CallLogItem
-                  key={call.id}
-                  call={call}
-                  contacts={contacts}
-                  onCall={onInitiateCall}
-                  isBlocked={blockedUserIds.includes(call.type === 'outgoing' ? call.receiverId : call.callerId)}
-                  onToggleBlock={onToggleBlock}
-                />
-              ))}
+              {filteredCalls.map(call => {
+                const otherId = call.callerId === contacts[0]?.id ? call.receiverId : call.callerId;
+                const resolvedId = call.type === 'outgoing' ? call.receiverId : call.callerId;
+                const isFriend = friendUserIds.has(resolvedId) || friendUserIds.has(otherId);
+                return (
+                  <CallLogItem
+                    key={call.id}
+                    call={call}
+                    contacts={contacts}
+                    isFriend={isFriend}
+                    onCall={onInitiateCall}
+                    onAddFriend={(contact) => onSendFriendRequest(contact.id, contact.name, contact.avatarUrl)}
+                    isBlocked={blockedUserIds.includes(call.type === 'outgoing' ? call.receiverId : call.callerId)}
+                    onToggleBlock={onToggleBlock}
+                  />
+                );
+              })}
             </div>
           </>
         ) : (

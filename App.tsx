@@ -20,6 +20,7 @@ import { IncomingCallModal } from './components/IncomingCallModal';
 import { RoomsScreen } from './components/RoomsScreen';
 import { RoomDetailScreen } from './components/RoomDetailScreen';
 import { Login } from './components/Login';
+import { PostCallModal } from './components/PostCallModal';
 import { PhoneCall, UserPlus } from 'lucide-react';
 import type { Tab, Group, Contact, Message, Chat, Call, User, FriendRequest, Room } from './types';
 import {
@@ -108,7 +109,9 @@ const App: React.FC = () => {
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showPostCallModal, setShowPostCallModal] = useState(false);
   const queueChannelRef = useRef<any>(null); // holds active matchmaking subscription
+  const lastRandomPartnerRef = useRef<{ contact: import('./types').Contact; callId: string } | null>(null);
 
   // Auto-dismiss toast after 3 seconds
   useEffect(() => {
@@ -445,6 +448,22 @@ const App: React.FC = () => {
     });
   }, [calls, contacts, user]);
 
+  // ─── Friend user IDs: users we share a chat with (accepted friends) ──────────
+  // A user is a "friend" if we have an existing 1-1 chat with them.
+  // This is the gate for re-calling: only friends can be called directly.
+  const friendUserIds = useMemo(() => {
+    if (!user?.id) return new Set<string>();
+    const ids = new Set<string>();
+    chats.forEach(chat => {
+      if (!chat.isGroup && chat.participants) {
+        chat.participants.forEach((pid: string) => {
+          if (pid !== user.id) ids.add(pid);
+        });
+      }
+    });
+    return ids;
+  }, [chats, user?.id]);
+
   // ─── HANDLERS ──────────────────────────────────────────────────────────────
 
   const handleRoomSelect = (room: Room | null) => {
@@ -631,11 +650,18 @@ const App: React.FC = () => {
   const startMatchedCall = useCallback(async (partnerId: string, partnerName: string, partnerAvatar: string, callId: string, isVideo: boolean, myId: string) => {
     setIsSearchingRandomCall(false);
     setSearchProgress(100);
-    // Deterministic roles: lower user ID is always the caller
     const isCaller = myId < partnerId;
+    const partnerContact = {
+      id: partnerId,
+      name: partnerName,
+      avatarUrl: partnerAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${partnerId}`,
+    };
 
-    // ── KEY FIX: Insert a calls row so the WebRTC signaling has a valid anchor
-    //    and call history works. Both users upsert: only one insert wins (no dup).
+    // Remember this random call partner so we can show the post-call modal
+    lastRandomPartnerRef.current = { contact: partnerContact, callId };
+    setLastCalledUser(partnerContact);
+
+    // Insert a calls row so WebRTC signaling works and history is populated
     try {
       await supabase.from('calls').upsert({
         id: callId,
@@ -647,19 +673,10 @@ const App: React.FC = () => {
         duration: 0,
       }, { onConflict: 'id' });
     } catch {
-      // non-fatal — call can still proceed without a history row
+      // non-fatal
     }
 
-    setActiveCall({
-      contact: {
-        id: partnerId,
-        name: partnerName,
-        avatarUrl: partnerAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${partnerId}`,
-      },
-      isVideo,
-      callId,
-      isCaller,
-    });
+    setActiveCall({ contact: partnerContact, isVideo, callId, isCaller });
   }, []);
 
 
@@ -808,7 +825,18 @@ const App: React.FC = () => {
     return friendRequests.filter(r => r.toId === user.id && r.status === 'pending');
   }, [user, friendRequests]);
 
-  const handleEndCall = () => setActiveCall(null);
+  const handleEndCall = () => {
+    setActiveCall(null);
+    // Show post-call modal only for random calls where partner is not yet a friend
+    if (lastRandomPartnerRef.current) {
+      const partnerId = lastRandomPartnerRef.current.contact.id;
+      // Only show if they're not yet a friend (no shared chat)
+      if (!friendUserIds.has(partnerId)) {
+        setShowPostCallModal(true);
+      }
+      lastRandomPartnerRef.current = null;
+    }
+  };
   const handleAcceptCall = () => {
     if (incomingCall) {
       setActiveCall({
@@ -981,8 +1009,10 @@ const App: React.FC = () => {
           <CallsScreen
             calls={enrichedCalls}
             contacts={contacts}
+            friendUserIds={friendUserIds}
             onInitiateCall={handleInitiateCall}
             onRandomCall={handleRandomCall}
+            onSendFriendRequest={handleSendFriendRequest}
             blockedUserIds={user.blockedUserIds || []}
             onToggleBlock={handleToggleBlock}
           />
@@ -1053,6 +1083,16 @@ const App: React.FC = () => {
       {/* Active call overlay */}
       {activeCall && <CallScreen call={activeCall} onEndCall={handleEndCall} />}
       {incomingCall && <IncomingCallModal call={incomingCall} onAccept={handleAcceptCall} onReject={handleRejectCall} />}
+
+      {/* Post-call: prompt to add friend after random call */}
+      {showPostCallModal && lastCalledUser && !friendUserIds.has(lastCalledUser.id) && (
+        <PostCallModal
+          partner={lastCalledUser}
+          isFriendRequestSent={isFriendRequestSent}
+          onSendFriendRequest={() => handleSendFriendRequest(lastCalledUser.id, lastCalledUser.name, lastCalledUser.avatarUrl)}
+          onClose={() => setShowPostCallModal(false)}
+        />
+      )}
 
       {/* Room screen */}
       {selectedRoom && user && (
