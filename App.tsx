@@ -7,7 +7,7 @@ import { ChatList } from './components/ChatList';
 import { BottomNav } from './components/BottomNav';
 import { Fab } from './components/Fab';
 import { UpdatesScreen } from './components/UpdatesScreen';
-import { CommunitiesScreen } from './components/CommunitiesScreen';
+import { GroupsScreen } from './components/GroupsScreen';
 import { CallsScreen } from './components/CallsScreen';
 import { ProfileDashboard } from './components/ProfileDashboard';
 import { CreateGroupModal } from './components/CreateGroupModal';
@@ -21,6 +21,7 @@ import { RoomsScreen } from './components/RoomsScreen';
 import { RoomDetailScreen } from './components/RoomDetailScreen';
 import { Login } from './components/Login';
 import { PostCallModal } from './components/PostCallModal';
+import { AdBanner } from './components/AdBanner';
 import { PhoneCall, UserPlus } from 'lucide-react';
 import type { Tab, Group, Contact, Message, Chat, Call, User, FriendRequest, Room } from './types';
 import {
@@ -1025,6 +1026,10 @@ const App: React.FC = () => {
               )}
             </div>
             <FilterPills activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+            {/* Non-intrusive ad — between filter and chat list, never inside chats */}
+            <div className="px-4 pb-1">
+              <AdBanner format="banner" variant="chatlist" />
+            </div>
             <ChatList
               chats={chats}
               activeFilter={activeFilter}
@@ -1036,7 +1041,15 @@ const App: React.FC = () => {
       case 'Updates':
         return <UpdatesScreen statuses={statuses} user={user} contacts={contacts} />;
       case 'Communities':
-        return <CommunitiesScreen communities={communities} />;
+        return (
+          <GroupsScreen
+            user={user}
+            contacts={contacts}
+            chats={chats.filter(c => c.isGroup)}
+            onOpenChat={(chat) => setSelectedChat(chat)}
+            onCreateGroup={() => setIsCreateGroupOpen(true)}
+          />
+        );
       case 'Calls':
         return (
           <CallsScreen

@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Camera } from 'lucide-react';
+import { Search, QrCode, Bell } from 'lucide-react';
 import { User } from '../types';
 
 interface HeaderProps {
@@ -10,17 +10,29 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ onProfileClick, user }) => {
   return (
-    <header className="bg-emerald-600 text-white p-4 flex justify-between items-center shadow-md z-20">
-      <h1 className="text-2xl font-bold tracking-tight">ViaaChat</h1>
-      <div className="flex items-center space-x-5 text-gray-100">
-        <button aria-label="Camera" className="hover:bg-emerald-700 p-2 rounded-full transition-colors">
-          <Camera size={22} />
+    <header className="bg-gray-950/95 backdrop-blur-xl text-white px-4 pt-safe-top pb-0 flex justify-between items-center z-20 border-b border-white/8">
+      <div className="py-3">
+        <h1 className="text-xl font-black tracking-tight text-white">ViaaChat</h1>
+        <p className="text-[10px] text-emerald-400 font-bold -mt-0.5">End-to-end encrypted</p>
+      </div>
+      <div className="flex items-center gap-1 text-white/60 pb-1">
+        <button aria-label="Notifications" className="w-9 h-9 flex items-center justify-center rounded-2xl hover:bg-white/8 transition-colors active:scale-95">
+          <Bell size={20} />
         </button>
-        <button onClick={onProfileClick} aria-label="Profile" className="w-9 h-9 rounded-full overflow-hidden border-2 border-emerald-400 active:scale-95 transition-transform">
-          <img 
-            src={user?.photoURL || "https://picsum.photos/seed/user/200"} 
-            className="w-full h-full object-cover" 
+        <button aria-label="Search" className="w-9 h-9 flex items-center justify-center rounded-2xl hover:bg-white/8 transition-colors active:scale-95">
+          <Search size={20} />
+        </button>
+        {/* Avatar opens full-screen profile */}
+        <button
+          onClick={onProfileClick}
+          aria-label="Profile & Settings"
+          className="w-9 h-9 ml-1 rounded-2xl overflow-hidden border-2 border-emerald-500/40 active:scale-95 transition-transform hover:border-emerald-400"
+        >
+          <img
+            src={user?.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.id || 'guest'}`}
+            className="w-full h-full object-cover"
             referrerPolicy="no-referrer"
+            alt="Profile"
           />
         </button>
       </div>

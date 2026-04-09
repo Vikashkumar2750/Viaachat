@@ -30,6 +30,7 @@ export interface Chat {
   admins?: string[];
   pinnedMessageIds?: string[];
   isMuted?: boolean;
+  isLocked?: boolean;
   typingStatus?: { [userId: string]: boolean };
 }
 
@@ -90,15 +91,18 @@ export interface FriendRequest {
 }
 
 export interface Seat {
-  id: number;           // 0-9
+  id: number;             // seat number 1-10
   userId: string | null;
-  userName: string | null;
-  userAvatar: string | null;
+  displayName: string | null; // was userName
+  photoURL: string | null;    // was userAvatar
   isMuted: boolean;
-  isClosed: boolean;
-  isLocked: boolean;
-  offeredToId: string | null;
-  isVideoOn: boolean;
+  isClosed?: boolean;
+  isLocked?: boolean;
+  offeredToId?: string | null;
+  isVideoOn?: boolean;
+  // Legacy aliases (backward compat)
+  userName?: string | null;
+  userAvatar?: string | null;
 }
 
 export interface Room {
