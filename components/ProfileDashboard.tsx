@@ -351,53 +351,160 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
     }
 
     if (section === 'install') {
+      // Detect current device so we can highlight the right section
+      const ua = navigator.userAgent;
+      const isAndroid = /android/i.test(ua);
+      const isIOS = /iphone|ipad|ipod/i.test(ua);
+      const isDesktop = !isAndroid && !isIOS;
+
+      // Helper to render an install button variant
+      const InstallBtn = ({ color, onClick, label, isAction = true }: {
+        color: 'emerald' | 'blue' | 'purple';
+        onClick?: () => void;
+        label: string;
+        isAction?: boolean;
+      }) => {
+        const colors: Record<string, string> = {
+          emerald: 'from-emerald-500 to-teal-500 shadow-emerald-500/30',
+          blue: 'from-blue-500 to-indigo-500 shadow-blue-500/30',
+          purple: 'from-violet-500 to-purple-600 shadow-purple-500/30',
+        };
+        return (
+          <button
+            onClick={onClick}
+            disabled={isInstalling || !isAction}
+            className={`w-full flex items-center justify-center gap-2.5 py-3.5 mt-3 rounded-2xl font-black text-white text-sm shadow-lg transition-all active:scale-95 hover:opacity-90 disabled:opacity-50
+              bg-gradient-to-r ${colors[color]}`}
+          >
+            {isInstalling ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+            {isInstalling ? 'Installing…' : label}
+          </button>
+        );
+      };
+
+      const InstalledBadge = () => (
+        <div className="w-full flex items-center justify-center gap-2 py-3 mt-3 bg-emerald-500/15 text-emerald-400 font-bold rounded-2xl border border-emerald-500/30 text-sm">
+          <Check size={16} /> ViaaChat is installed on this device!
+        </div>
+      );
+
+      const steps = (items: string[], color: 'emerald' | 'blue' | 'purple') => (
+        <div className="px-4 pt-3 pb-2 space-y-2.5">
+          {items.map((s, i) => (
+            <div key={i} className="flex gap-3 items-start">
+              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0 mt-0.5
+                ${color === 'emerald' ? 'bg-emerald-500/20 text-emerald-400'
+                  : color === 'blue' ? 'bg-blue-500/20 text-blue-400'
+                  : 'bg-purple-500/20 text-purple-400'}`}>{i + 1}</span>
+              <p className="text-sm text-white/70 leading-relaxed">{s}</p>
+            </div>
+          ))}
+        </div>
+      );
+
       return (
-        <div>
-          <Section title="Install on Android">
-            <div className="px-4 py-3 space-y-2">
-              {['Open in Chrome browser', 'Tap ⋮ (3 dots) in the top right', 'Tap "Add to Home screen"', 'Tap "Install" to confirm'].map((s, i) => (
-                <div key={i} className="flex gap-3 items-start">
-                  <span className="w-6 h-6 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0 mt-0.5">{i + 1}</span>
-                  <p className="text-sm text-white/70">{s}</p>
-                </div>
-              ))}
+        <div className="space-y-4 pb-4">
+
+          {/* Current device top hint */}
+          <div className="bg-white/5 border border-white/10 rounded-2xl px-4 py-3 flex items-center gap-3">
+            <span className="text-2xl">{isAndroid ? '📱' : isIOS ? '🍎' : '💻'}</span>
+            <div>
+              <p className="text-sm font-bold text-white">
+                {isAndroid ? 'You\'re on Android' : isIOS ? 'You\'re on iPhone/iPad' : 'You\'re on a Desktop'}
+              </p>
+              <p className="text-xs text-white/40">
+                {isInstalled ? 'App already installed ✓'
+                  : canInstall ? 'One-tap install available for your device ↓'
+                  : isIOS ? 'Use Safari to install — see steps below ↓'
+                  : 'See your device section below ↓'}
+              </p>
             </div>
-          </Section>
-          <Section title="Install on iPhone (Safari)">
-            <div className="px-4 py-3 space-y-2">
-              {['Open in Safari browser', 'Tap the Share icon (square with arrow)', 'Scroll down and tap "Add to Home Screen"', 'Tap "Add" in the top right'].map((s, i) => (
-                <div key={i} className="flex gap-3 items-start">
-                  <span className="w-6 h-6 bg-blue-500/20 text-blue-400 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0 mt-0.5">{i + 1}</span>
-                  <p className="text-sm text-white/70">{s}</p>
-                </div>
-              ))}
+          </div>
+
+          {/* ── Android ── */}
+          <div className={`bg-white/5 rounded-2xl border-2 overflow-hidden transition-all ${isAndroid ? 'border-emerald-500/50 shadow-lg shadow-emerald-500/10' : 'border-white/8'}`}>
+            <div className="flex items-center gap-2 px-4 pt-4 pb-0">
+              <span className="text-lg">📱</span>
+              <p className="font-black text-white text-sm">Android (Chrome)</p>
+              {isAndroid && <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-full">Your device</span>}
             </div>
-          </Section>
-          <Section title="Install on Desktop">
-            <div className="px-4 py-3 space-y-2">
-              {['Open in Chrome or Edge', 'Click the install icon (⊕) in the address bar', 'Click "Install" in the popup'].map((s, i) => (
-                <div key={i} className="flex gap-3 items-start">
-                  <span className="w-6 h-6 bg-purple-500/20 text-purple-400 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0 mt-0.5">{i + 1}</span>
-                  <p className="text-sm text-white/70">{s}</p>
-                </div>
-              ))}
+            {steps(['Open viaachat.vercel.app in Chrome', 'Tap ⋮ (3-dot menu) in the top-right', 'Tap "Add to Home screen"', 'Tap "Install" in the popup to confirm'], 'emerald')}
+            <div className="px-4 pb-4">
+              {isInstalled ? <InstalledBadge /> : (
+                canInstall ? (
+                  <InstallBtn color="emerald" onClick={() => install()} label="📲 Install on this Android" />
+                ) : isAndroid ? (
+                  <div className="mt-3 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                    <p className="text-xs text-amber-400 font-semibold">⚠️ Not showing install button? Make sure you're using Chrome (not Samsung Browser or Firefox).</p>
+                  </div>
+                ) : (
+                  <InstallBtn color="emerald" onClick={undefined} label="Open on Android to install" isAction={false} />
+                )
+              )}
             </div>
-          </Section>
-          {canInstall && (
-            <button
-              onClick={() => install()}
-              disabled={isInstalling}
-              className="w-full mt-2 flex items-center justify-center gap-2 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-black rounded-2xl shadow-lg shadow-emerald-500/30 hover:opacity-90 transition-all disabled:opacity-50"
-            >
-              {isInstalling ? <Loader2 size={20} className="animate-spin" /> : <Download size={20} />}
-              {isInstalling ? 'Installing…' : 'Install Now (One Tap)'}
-            </button>
-          )}
-          {isInstalled && (
-            <div className="w-full flex items-center justify-center gap-2 py-3.5 bg-emerald-500/15 text-emerald-400 font-bold rounded-2xl border border-emerald-500/30 mt-2">
-              <Check size={18} /> ViaaChat is installed!
+          </div>
+
+          {/* ── iPhone / iPad ── */}
+          <div className={`bg-white/5 rounded-2xl border-2 overflow-hidden transition-all ${isIOS ? 'border-blue-500/50 shadow-lg shadow-blue-500/10' : 'border-white/8'}`}>
+            <div className="flex items-center gap-2 px-4 pt-4 pb-0">
+              <span className="text-lg">🍎</span>
+              <p className="font-black text-white text-sm">iPhone / iPad (Safari)</p>
+              {isIOS && <span className="ml-auto text-[10px] bg-blue-500/20 text-blue-400 font-bold px-2 py-0.5 rounded-full">Your device</span>}
             </div>
-          )}
+            {steps(['Open viaachat.vercel.app in Safari', 'Tap the Share icon (□↑) at the bottom', 'Scroll down → tap "Add to Home Screen"', 'Tap "Add" in the top-right corner'], 'blue')}
+            <div className="px-4 pb-4">
+              {isInstalled ? <InstalledBadge /> : isIOS ? (
+                // iOS doesn't support beforeinstallprompt — use Web Share API to open share sheet
+                <button
+                  onClick={async () => {
+                    if (navigator.share) {
+                      try {
+                        await navigator.share({ title: 'ViaaChat', url: window.location.href });
+                      } catch {}
+                    }
+                  }}
+                  className="w-full flex items-center justify-center gap-2.5 py-3.5 mt-3 rounded-2xl font-black text-white text-sm shadow-lg bg-gradient-to-r from-blue-500 to-indigo-500 shadow-blue-500/30 active:scale-95 hover:opacity-90 transition-all"
+                >
+                  <Download size={18} />
+                  Open Share Sheet → Add to Home Screen
+                </button>
+              ) : (
+                <InstallBtn color="blue" onClick={undefined} label="Open on iPhone/iPad to install" isAction={false} />
+              )}
+              {isIOS && (
+                <p className="text-center text-[10px] text-white/25 mt-2">
+                  Apple requires manual install via Safari — auto-install is not supported on iOS
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* ── Desktop ── */}
+          <div className={`bg-white/5 rounded-2xl border-2 overflow-hidden transition-all ${isDesktop ? 'border-purple-500/50 shadow-lg shadow-purple-500/10' : 'border-white/8'}`}>
+            <div className="flex items-center gap-2 px-4 pt-4 pb-0">
+              <span className="text-lg">💻</span>
+              <p className="font-black text-white text-sm">Desktop (Chrome / Edge)</p>
+              {isDesktop && <span className="ml-auto text-[10px] bg-purple-500/20 text-purple-400 font-bold px-2 py-0.5 rounded-full">Your device</span>}
+            </div>
+            {steps(['Open viaachat.vercel.app in Chrome or Edge', 'Look for the install icon (⊕) in the address bar', 'Click it and select "Install" in the popup', 'OR use ⋮ menu → "Install ViaaChat"'], 'purple')}
+            <div className="px-4 pb-4">
+              {isInstalled ? <InstalledBadge /> : (
+                canInstall ? (
+                  <InstallBtn color="purple" onClick={() => install()} label="⬇ Install on this Desktop" />
+                ) : isDesktop ? (
+                  <div className="mt-3 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                    <p className="text-xs text-amber-400 font-semibold">⚠️ Install button not showing? Make sure you're using Chrome or Edge, and not already in installed mode.</p>
+                  </div>
+                ) : (
+                  <InstallBtn color="purple" onClick={undefined} label="Open on Desktop to install" isAction={false} />
+                )
+              )}
+            </div>
+          </div>
+
+          <p className="text-center text-[10px] text-white/20 pt-1">
+            ViaaChat PWA · Works offline · No app store needed · Free forever
+          </p>
         </div>
       );
     }
