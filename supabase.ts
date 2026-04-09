@@ -10,7 +10,11 @@ export const isSupabaseConfigured = !!(
   supabaseAnonKey !== 'your-anon-key-here'
 );
 
-// Use placeholder values so createClient doesn't crash — real calls will fail gracefully
+// ── Supabase client ──────────────────────────────────────────────────────────
+// Key settings for reliable auth across page refreshes and OAuth callbacks:
+//   persistSession: true  → stores session in localStorage so refresh works
+//   detectSessionInUrl: true  → picks up #access_token from Google OAuth redirect
+//   autoRefreshToken: true  → silently refreshes JWT before it expires
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
   supabaseAnonKey || 'placeholder-key',
@@ -19,17 +23,14 @@ export const supabase = createClient(
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: true,
-      // Unique storage key per app to avoid cross-tab lock conflicts
       storageKey: 'viaachat-auth-token',
-      // Suppress Supabase's own console warning about dangling promises
+      storage: window.localStorage,
+      flowType: 'pkce', // More secure OAuth flow; also fixes redirect issues
       debug: false,
     },
     realtime: {
-      params: {
-        eventsPerSecond: 10,
-      },
+      params: { eventsPerSecond: 10 },
     },
-    // Increase global fetch timeout for slow networks
     global: {
       headers: { 'x-application-name': 'viaachat' },
     },
@@ -41,15 +42,22 @@ export const supabase = createClient(
 // AUTH HELPERS
 // ===========================
 
+/**
+ * Google OAuth — redirects the user to Google, then back to the app.
+ * IMPORTANT: Add https://viaachat.vercel.app/** to Supabase Dashboard →
+ * Authentication → URL Configuration → Redirect URLs.
+ */
 export async function signInWithGoogle() {
+  const redirectTo = `${window.location.origin}/`;
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo: window.location.origin,
+      redirectTo,
       queryParams: {
         access_type: 'offline',
-        prompt: 'consent',
+        prompt: 'select_account', // let user pick their Google account
       },
+      skipBrowserRedirect: false,
     },
   });
   if (error) throw error;
@@ -68,19 +76,23 @@ export async function signUpWithEmail(email: string, password: string, displayNa
     password,
     options: {
       data: { full_name: displayName },
+      emailRedirectTo: `${window.location.origin}/`,
     },
   });
   if (error) throw error;
   return data;
 }
 
+/**
+ * Anonymous (Guest) sign-in.
+ * Requires "Anonymous Sign-ins" enabled in Supabase Dashboard →
+ * Authentication → Providers → Anonymous Sign-ins.
+ */
 export async function signInAsGuest() {
-  // Race the anonymous sign-in against a 6-second timeout.
-  // Without the timeout, a stuck auth lock makes this hang indefinitely.
   const timeoutPromise = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error(
-      'Guest sign-in timed out. Please enable Anonymous Auth in Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins, then try again.'
-    )), 6000)
+      'Guest sign-in timed out. Enable Anonymous Auth in Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins.'
+    )), 8000)
   );
 
   try {
@@ -105,10 +117,15 @@ export async function signOut() {
   if (error) throw error;
 }
 
+
 // ===========================
 // USER SYNC
 // ===========================
 
+/**
+ * Upsert the authenticated user into the public.users table.
+ * Called on SIGNED_IN and when the profile is missing after INITIAL_SESSION.
+ */
 export async function syncUser(authUser: { id: string; email?: string | null; user_metadata?: any }) {
   const displayName =
     authUser.user_metadata?.full_name ||
@@ -123,7 +140,7 @@ export async function syncUser(authUser: { id: string; email?: string | null; us
 
   const { error } = await supabase.from('users').upsert(
     {
-      id: authUser.id,
+      id: authUser.id,         // TEXT primary key — UUID stored as text
       display_name: displayName,
       photo_url: photoUrl,
       email: authUser.email || null,
@@ -133,7 +150,7 @@ export async function syncUser(authUser: { id: string; email?: string | null; us
   );
 
   if (error) {
-    console.error('Error syncing user:', error.message);
+    console.error('syncUser error:', error.message);
   }
 }
 
@@ -145,6 +162,7 @@ export async function updateUserPresence(userId: string) {
     .eq('id', userId);
 }
 
+
 // ===========================
 // MESSAGING HELPERS
 // ===========================
@@ -152,6 +170,7 @@ export async function updateUserPresence(userId: string) {
 export async function markChatAsRead(chatId: string) {
   await supabase.from('chats').update({ unread_count: 0 }).eq('id', chatId);
 }
+
 
 // ===========================
 // REALTIME CHANNEL FACTORY
@@ -163,13 +182,13 @@ export function createRealtimeChannel(name: string): RealtimeChannel {
 
 export { RealtimeChannel };
 
+
 // ===========================
 // ERROR HANDLER
 // ===========================
 
 export function handleSupabaseError(error: any, context: string) {
   if (!error) return;
-  // Don't log auth lock errors — they're transient and non-critical
   if (error.message?.includes('Lock') || error.code === 'auth_lock_conflict') return;
   console.error(`Supabase Error [${context}]:`, error.message || error);
 }

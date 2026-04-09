@@ -122,45 +122,88 @@ const App: React.FC = () => {
 
   // ─── Auth: listen to Supabase auth changes ─────────────────────────────────
   useEffect(() => {
-    // Hard timeout: never stay in loading state longer than 8 seconds
-    const loadingTimeout = setTimeout(() => setLoading(false), 8000);
+    // Hard timeout: if nothing fires in 10s, clear loading state
+    const loadingTimeout = setTimeout(() => setLoading(false), 10000);
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       try {
         if (session?.user) {
-          // Only call syncUser on actual sign-in events, not every session restore
-          if (event === 'SIGNED_IN') {
-            await syncUser(session.user);
+          const u = session.user;
+
+          // Sync user row to DB on actual sign-in events (not on every session restore)
+          if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+            await syncUser(u);
           }
 
-          // Fetch profile (works for all events including INITIAL_SESSION & TOKEN_REFRESHED)
+          // Fetch profile from our users table
           const { data: profile, error: profileError } = await supabase
             .from('users')
             .select('*')
-            .eq('id', session.user.id)
+            .eq('id', u.id)
             .single();
 
           if (profile && !profileError) {
+            // ✅ Normal path — profile exists
             setUser(dbToUser(profile));
           } else if (profileError?.code === 'PGRST116' || !profile) {
-            // Profile missing — create it (new user or anonymous)
-            await syncUser(session.user);
+            // Profile missing (new user, first login) — create it
+            await syncUser(u);
             const { data: retryProfile } = await supabase
               .from('users')
               .select('*')
-              .eq('id', session.user.id)
+              .eq('id', u.id)
               .single();
-            if (retryProfile) setUser(dbToUser(retryProfile));
+
+            if (retryProfile) {
+              setUser(dbToUser(retryProfile));
+            } else {
+              // ── Fallback: use session data directly so refresh never crashes ──
+              // This happens when RLS blocks the read on first load before
+              // the profile row is committed. We build a minimal user object
+              // from the JWT claims so the app stays logged in.
+              setUser({
+                id: u.id,
+                displayName:
+                  u.user_metadata?.full_name ||
+                  u.user_metadata?.name ||
+                  u.email?.split('@')[0] ||
+                  `Guest_${u.id.slice(0, 6)}`,
+                photoURL:
+                  u.user_metadata?.avatar_url ||
+                  u.user_metadata?.picture ||
+                  `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.id}`,
+                email: u.email || '',
+                lastSeen: new Date().toISOString(),
+                blockedUserIds: [],
+              });
+            }
+          } else {
+            // Any other DB error — stay logged in using session data
+            setUser({
+              id: u.id,
+              displayName:
+                u.user_metadata?.full_name ||
+                u.user_metadata?.name ||
+                u.email?.split('@')[0] ||
+                `Guest_${u.id.slice(0, 6)}`,
+              photoURL:
+                u.user_metadata?.avatar_url ||
+                u.user_metadata?.picture ||
+                `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.id}`,
+              email: u.email || '',
+              lastSeen: new Date().toISOString(),
+              blockedUserIds: [],
+            });
           }
         } else {
+          // No session
           setUser(null);
         }
-      } catch (err) {
-        // Auth lock errors are transient — don't crash the app
-        if (!(err as any)?.message?.includes('Lock')) {
+      } catch (err: any) {
+        // Auth lock errors are transient — don't crash
+        if (!err?.message?.includes('Lock')) {
           console.error('Auth state change error:', err);
         }
-        // Only clear user on explicit sign-out
         if (event === 'SIGNED_OUT') setUser(null);
       } finally {
         clearTimeout(loadingTimeout);
@@ -173,6 +216,7 @@ const App: React.FC = () => {
       subscription.unsubscribe();
     };
   }, []);
+
 
   // ─── Presence: update lastSeen immediately + every 60 seconds ───────────────
   useEffect(() => {
