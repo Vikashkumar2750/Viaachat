@@ -16,6 +16,18 @@ export const Login: React.FC = () => {
   const [loadingEmail, setLoadingEmail] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // One-time startup: remove stale PKCE code-verifier left by old builds.
+  // This key causes signInAnonymously() to hang indefinitely (GoTrue lock).
+  React.useEffect(() => {
+    try {
+      localStorage.removeItem('viaachat-auth-token-code-verifier');
+      // Also clear any supabase-default code verifier keys
+      Object.keys(localStorage)
+        .filter(k => k.includes('code-verifier') || k.includes('pkce'))
+        .forEach(k => localStorage.removeItem(k));
+    } catch {}
+  }, []);
+
   const handleGoogleLogin = async () => {
     setLoadingGoogle(true);
     setError(null);

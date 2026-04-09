@@ -11,10 +11,10 @@ export const isSupabaseConfigured = !!(
 );
 
 // ── Supabase client ──────────────────────────────────────────────────────────
-// Key settings for reliable auth across page refreshes and OAuth callbacks:
-//   persistSession: true  → stores session in localStorage so refresh works
-//   detectSessionInUrl: true  → picks up #access_token from Google OAuth redirect
-//   autoRefreshToken: true  → silently refreshes JWT before it expires
+// IMPORTANT: flowType is NOT set to 'pkce' here.
+// PKCE is for OAuth redirect flows only. Setting it globally causes the GoTrue
+// auth lock to misfire during anonymous sign-in, causing it to hang indefinitely.
+// Google OAuth redirect still works correctly with the default implicit flow for SPAs.
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
   supabaseAnonKey || 'placeholder-key',
@@ -22,10 +22,11 @@ export const supabase = createClient(
     auth: {
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: true,
+      detectSessionInUrl: true,   // picks up #access_token hash from Google OAuth
       storageKey: 'viaachat-auth-token',
       storage: window.localStorage,
-      flowType: 'pkce', // More secure OAuth flow; also fixes redirect issues
+      // flowType intentionally omitted — defaults to 'implicit' which works for
+      // SPAs, anonymous sign-in, email/password, AND Google OAuth redirect
       debug: false,
     },
     realtime: {
@@ -42,22 +43,15 @@ export const supabase = createClient(
 // AUTH HELPERS
 // ===========================
 
-/**
- * Google OAuth — redirects the user to Google, then back to the app.
- * IMPORTANT: Add https://viaachat.vercel.app/** to Supabase Dashboard →
- * Authentication → URL Configuration → Redirect URLs.
- */
 export async function signInWithGoogle() {
-  const redirectTo = `${window.location.origin}/`;
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo,
+      redirectTo: `${window.location.origin}/`,
       queryParams: {
         access_type: 'offline',
-        prompt: 'select_account', // let user pick their Google account
+        prompt: 'select_account',
       },
-      skipBrowserRedirect: false,
     },
   });
   if (error) throw error;
@@ -84,26 +78,56 @@ export async function signUpWithEmail(email: string, password: string, displayNa
 }
 
 /**
- * Anonymous (Guest) sign-in.
- * Requires "Anonymous Sign-ins" enabled in Supabase Dashboard →
- * Authentication → Providers → Anonymous Sign-ins.
+ * Anonymous (Guest) sign-in — fast path.
+ *
+ * Strategy:
+ * 1. If already have a valid anonymous session → return it instantly (no network call)
+ * 2. If stale anon session detected → clear storage and sign in fresh
+ * 3. On any GoTrue lock timeout → clear storage and retry once
  */
 export async function signInAsGuest() {
-  const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(
-      'Guest sign-in timed out. Enable Anonymous Auth in Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins.'
-    )), 8000)
-  );
-
+  // ── Fast path: reuse existing anonymous session ───────────────────────────
+  // getSession() reads from localStorage — no network call needed
   try {
-    const { data, error } = await Promise.race([
-      supabase.auth.signInAnonymously(),
-      timeoutPromise,
-    ]) as any;
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user && session.user.is_anonymous) {
+      return { user: session.user, session };
+    }
+  } catch {}
+
+  // ── Sign in anonymously with single retry on lock timeout ─────────────────
+  const attempt = async () => {
+    const { data, error } = await supabase.auth.signInAnonymously();
     if (error) throw error;
     return data;
+  };
+
+  try {
+    // First attempt: wrap with a 5s timeout to detect lock hang
+    const result = await Promise.race([
+      attempt(),
+      new Promise<null>(r => setTimeout(() => r(null), 5000)),
+    ]);
+
+    if (result !== null) return result; // success
+
+    // ── Lock timeout hit: clear stale auth storage and retry ─────────────────
+    console.warn('[guest] signInAnonymously timed out — clearing auth storage & retrying');
+    try {
+      localStorage.removeItem('viaachat-auth-token');
+      localStorage.removeItem('viaachat-auth-token-code-verifier'); // PKCE remnant
+    } catch {}
+
+    // Retry directly — no timeout wrapper this time
+    return await attempt();
+
   } catch (err: any) {
-    if (err?.message?.includes('not enabled') || err?.status === 422) {
+    // Map Supabase "not enabled" error to friendly message
+    if (
+      err?.message?.toLowerCase().includes('anonymous') ||
+      err?.message?.includes('not enabled') ||
+      err?.status === 422
+    ) {
       throw new Error(
         'Anonymous login is not enabled. Go to Supabase Dashboard → Authentication → Providers → Anonymous Sign-ins and enable it.'
       );
@@ -113,6 +137,10 @@ export async function signInAsGuest() {
 }
 
 export async function signOut() {
+  // Clear PKCE remnant keys too (may exist from previous build)
+  try {
+    localStorage.removeItem('viaachat-auth-token-code-verifier');
+  } catch {}
   const { error } = await supabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
 }
@@ -123,15 +151,17 @@ export async function signOut() {
 // ===========================
 
 /**
- * Upsert the authenticated user into the public.users table.
- * Called on SIGNED_IN and when the profile is missing after INITIAL_SESSION.
+ * Upsert the authenticated user into public.users.
+ * FIRE-AND-FORGET: callers should NOT await this in auth state handlers
+ * to keep the login UI instant. The DB write happens in the background.
  */
 export async function syncUser(authUser: { id: string; email?: string | null; user_metadata?: any }) {
+  const isAnon = (authUser as any).is_anonymous === true;
   const displayName =
     authUser.user_metadata?.full_name ||
     authUser.user_metadata?.name ||
     authUser.email?.split('@')[0] ||
-    `Guest_${authUser.id.slice(0, 6)}`;
+    (isAnon ? `Guest_${authUser.id.slice(0, 6)}` : `User_${authUser.id.slice(0, 6)}`);
 
   const photoUrl =
     authUser.user_metadata?.avatar_url ||
@@ -140,7 +170,7 @@ export async function syncUser(authUser: { id: string; email?: string | null; us
 
   const { error } = await supabase.from('users').upsert(
     {
-      id: authUser.id,         // TEXT primary key — UUID stored as text
+      id: authUser.id,
       display_name: displayName,
       photo_url: photoUrl,
       email: authUser.email || null,

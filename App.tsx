@@ -122,93 +122,82 @@ const App: React.FC = () => {
 
   // ─── Auth: listen to Supabase auth changes ─────────────────────────────────
   useEffect(() => {
-    // Hard timeout: if nothing fires in 10s, clear loading state
-    const loadingTimeout = setTimeout(() => setLoading(false), 10000);
+    // Hard timeout safety net: never stay loading > 8s
+    const loadingTimeout = setTimeout(() => setLoading(false), 8000);
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      try {
-        if (session?.user) {
-          const u = session.user;
+    // ── Helper: build user object directly from JWT claims (zero network calls) ──
+    // This is the FAST PATH — user sees the app instantly.
+    // The profile is then enriched from the DB in the background.
+    const userFromSession = (u: any) => ({
+      id: u.id,
+      displayName:
+        u.user_metadata?.full_name ||
+        u.user_metadata?.name ||
+        u.email?.split('@')[0] ||
+        (u.is_anonymous ? `Guest_${u.id.slice(0, 6)}` : `User_${u.id.slice(0, 6)}`),
+      photoURL:
+        u.user_metadata?.avatar_url ||
+        u.user_metadata?.picture ||
+        `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.id}`,
+      email: u.email || '',
+      lastSeen: new Date().toISOString(),
+      blockedUserIds: [],
+    });
 
-          // Sync user row to DB on actual sign-in events (not on every session restore)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // Clear loading IMMEDIATELY — don't await anything
+      clearTimeout(loadingTimeout);
+      setLoading(false);
+
+      if (!session?.user) {
+        setUser(null);
+        return;
+      }
+
+      const u = session.user;
+
+      // ── INSTANT: set user from JWT claims right now ───────────────────────
+      setUser(userFromSession(u));
+
+      // ── BACKGROUND: sync to DB + enrich profile (non-blocking) ───────────
+      // Do NOT await this — runs after the UI has already rendered
+      const syncAndEnrich = async () => {
+        try {
+          // Write to DB on sign-in/update events
           if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
-            await syncUser(u);
+            await syncUser(u); // fire-and-forget safe — errors are caught below
           }
 
-          // Fetch profile from our users table
-          const { data: profile, error: profileError } = await supabase
+          // Fetch enriched profile (display_name, photo from DB, blocked list, etc.)
+          const { data: profile } = await supabase
             .from('users')
             .select('*')
             .eq('id', u.id)
             .single();
 
-          if (profile && !profileError) {
-            // ✅ Normal path — profile exists
+          if (profile) {
+            // Update user with richer DB data
             setUser(dbToUser(profile));
-          } else if (profileError?.code === 'PGRST116' || !profile) {
-            // Profile missing (new user, first login) — create it
-            await syncUser(u);
+          } else if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+            // Profile row didn't exist yet (first login race) — it was just created above
+            // Retry once after a short delay
+            await new Promise(r => setTimeout(r, 800));
             const { data: retryProfile } = await supabase
               .from('users')
               .select('*')
               .eq('id', u.id)
               .single();
-
-            if (retryProfile) {
-              setUser(dbToUser(retryProfile));
-            } else {
-              // ── Fallback: use session data directly so refresh never crashes ──
-              // This happens when RLS blocks the read on first load before
-              // the profile row is committed. We build a minimal user object
-              // from the JWT claims so the app stays logged in.
-              setUser({
-                id: u.id,
-                displayName:
-                  u.user_metadata?.full_name ||
-                  u.user_metadata?.name ||
-                  u.email?.split('@')[0] ||
-                  `Guest_${u.id.slice(0, 6)}`,
-                photoURL:
-                  u.user_metadata?.avatar_url ||
-                  u.user_metadata?.picture ||
-                  `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.id}`,
-                email: u.email || '',
-                lastSeen: new Date().toISOString(),
-                blockedUserIds: [],
-              });
-            }
-          } else {
-            // Any other DB error — stay logged in using session data
-            setUser({
-              id: u.id,
-              displayName:
-                u.user_metadata?.full_name ||
-                u.user_metadata?.name ||
-                u.email?.split('@')[0] ||
-                `Guest_${u.id.slice(0, 6)}`,
-              photoURL:
-                u.user_metadata?.avatar_url ||
-                u.user_metadata?.picture ||
-                `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.id}`,
-              email: u.email || '',
-              lastSeen: new Date().toISOString(),
-              blockedUserIds: [],
-            });
+            if (retryProfile) setUser(dbToUser(retryProfile));
           }
-        } else {
-          // No session
-          setUser(null);
+        } catch (err: any) {
+          // DB errors don't affect login — user is already set from JWT claims
+          if (!err?.message?.includes('Lock')) {
+            console.warn('Background sync error (non-critical):', err?.message);
+          }
         }
-      } catch (err: any) {
-        // Auth lock errors are transient — don't crash
-        if (!err?.message?.includes('Lock')) {
-          console.error('Auth state change error:', err);
-        }
-        if (event === 'SIGNED_OUT') setUser(null);
-      } finally {
-        clearTimeout(loadingTimeout);
-        setLoading(false);
-      }
+      };
+
+      syncAndEnrich(); // intentionally not awaited
     });
 
     return () => {
