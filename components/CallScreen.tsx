@@ -17,12 +17,10 @@ interface CallScreenProps {
   onEndCall: () => void;
 }
 
-// ─── Multiple free TURN servers for redundancy ───────────────────────────────
+// ─── ICE / STUN / TURN Configuration ─────────────────────────────────────────
 const RTCServers: RTCConfiguration = {
   iceServers: [
-    // Google STUN (most reliable, no auth needed)
     { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302', 'stun:stun4.l.google.com:19302'] },
-    // Open Relay Project (free TURN)
     {
       urls: [
         'turn:openrelay.metered.ca:80',
@@ -33,21 +31,17 @@ const RTCServers: RTCConfiguration = {
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
-    // Metered.ca free STUN
     { urls: 'stun:stun.relay.metered.ca:80' },
-    // Twilio-style free STUN
-    { urls: ['stun:global.stun.twilio.com:3478'] },
   ],
-  iceCandidatePoolSize: 16,
+  iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 };
 
-// ─── Call Quality Monitor ────────────────────────────────────────────────────
+// ─── Call Quality Monitor ─────────────────────────────────────────────────────
 const CallQuality: React.FC<{ pc: RTCPeerConnection | null }> = ({ pc }) => {
   const [quality, setQuality] = useState(3);
   const [latency, setLatency] = useState(0);
-  const [packetLoss, setPacketLoss] = useState(0);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -59,13 +53,10 @@ const CallQuality: React.FC<{ pc: RTCPeerConnection | null }> = ({ pc }) => {
             const rtt = Math.round(report.roundTripTime * 1000);
             setLatency(rtt);
             const loss = report.fractionLost ? Math.round(report.fractionLost * 100) : 0;
-            setPacketLoss(loss);
             setQuality(rtt < 100 && loss < 5 ? 3 : rtt < 300 && loss < 15 ? 2 : 1);
           }
         });
-      } catch {
-        // ignore stats errors
-      }
+      } catch {}
     }, 3000);
     return () => clearInterval(interval);
   }, [pc]);
@@ -83,485 +74,459 @@ const CallQuality: React.FC<{ pc: RTCPeerConnection | null }> = ({ pc }) => {
         <Activity size={14} />
         <span>{latency > 0 ? `${latency}ms` : '---'}</span>
       </div>
-      {packetLoss > 0 && (
-        <>
-          <div className="w-px h-4 bg-white/10" />
-          <div className="flex items-center gap-1.5 text-amber-400">
-            <span>{packetLoss}% loss</span>
-          </div>
-        </>
-      )}
     </div>
   );
 };
 
-// ─── Ring tone using Web Audio API ──────────────────────────────────────────
+// ─── Ring tone ────────────────────────────────────────────────────────────────
 function useRingTone(active: boolean) {
-  const contextRef = useRef<AudioContext | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const playRing = useCallback(() => {
     try {
-      if (!contextRef.current || contextRef.current.state === 'closed') {
-        contextRef.current = new AudioContext();
-      }
-      const ctx = contextRef.current;
+      if (!ctxRef.current || ctxRef.current.state === 'closed') ctxRef.current = new AudioContext();
+      const ctx = ctxRef.current;
       if (ctx.state === 'suspended') ctx.resume();
-      const oscillator = ctx.createOscillator();
-      const gainNode = ctx.createGain();
-      oscillator.connect(gainNode);
-      gainNode.connect(ctx.destination);
-      oscillator.frequency.setValueAtTime(480, ctx.currentTime);
-      oscillator.frequency.setValueAtTime(440, ctx.currentTime + 0.1);
-      gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-      oscillator.start(ctx.currentTime);
-      oscillator.stop(ctx.currentTime + 0.5);
-    } catch {
-      // Audio context not supported
-    }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(480, ctx.currentTime);
+      osc.frequency.setValueAtTime(440, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.5);
+    } catch {}
   }, []);
 
   useEffect(() => {
     if (!active) {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      // Close context when ring stops to avoid the "closed context" warning
-      if (contextRef.current) {
-        contextRef.current.close().catch(() => {});
-        contextRef.current = null;
-      }
+      ctxRef.current?.close().catch(() => {});
+      ctxRef.current = null;
       return;
     }
     playRing();
     intervalRef.current = setInterval(playRing, 2500);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [active, playRing]);
-
-  return { stop: () => { if (intervalRef.current) clearInterval(intervalRef.current); } };
 }
 
-// ─── MAIN CALL SCREEN ────────────────────────────────────────────────────────
+// ─── MAIN CALL SCREEN ─────────────────────────────────────────────────────────
 export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const [callStatus, setCallStatus] = useState<string>(call.isCaller ? 'Calling...' : 'Connecting...');
   const [duration, setDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isSpeakerOn, setIsSpeakerOn] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true); // DEFAULT speaker ON for mobile UX
   const [isCameraOn, setIsCameraOn] = useState(call.isVideo);
   const [connectionError, setConnectionError] = useState('');
   const [isReconnecting, setIsReconnecting] = useState(false);
-  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false); // browser autoplay blocked
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const [remoteVideoReady, setRemoteVideoReady] = useState(false); // track if remote video arrived
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
+  // ── Media element refs ──────────────────────────────────────────────────────
+  const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  // ── KEY FIX: Dedicated audio element always rendered ─────────────────────────
-  // For voice calls, remoteVideoRef is NOT in the DOM, so we need a separate
-  // <audio> element that is always mounted to play remote audio.
+  // ALWAYS rendered hidden <audio> for remote audio — guaranteed to be in DOM
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
-  const remoteDescSet = useRef(false);
-  const callStartTime = useRef<number | null>(null);
-  const channelsRef = useRef<any[]>([]);
-  const endedRef = useRef(false);
+
+  // ── WebRTC refs ─────────────────────────────────────────────────────────────
+  const localStreamRef     = useRef<MediaStream | null>(null);
+  const remoteStreamRef    = useRef<MediaStream | null>(null); // keep track of remote stream
+  const pcRef              = useRef<RTCPeerConnection | null>(null);
+  const pendingCandidates  = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescSet      = useRef(false);
+  const callStartTime      = useRef<number | null>(null);
+  const channelsRef        = useRef<any[]>([]);
+  const endedRef           = useRef(false);
 
   useRingTone(call.isCaller && callStatus === 'Calling...');
 
-  const cleanupChanel = useCallback((channel: any) => {
-    try { supabase.removeChannel(channel); } catch {}
+  // ── Helper: play audio safely handling autoplay policy ─────────────────────
+  const playRemoteAudio = useCallback(async () => {
+    const el = remoteAudioRef.current;
+    if (!el || !el.srcObject) return;
+    el.volume = 1.0;
+    try {
+      await el.play();
+      setNeedsAudioUnlock(false);
+    } catch {
+      // Autoplay blocked — user must interact first
+      setNeedsAudioUnlock(true);
+    }
   }, []);
 
+  // ── Helper: attach remote stream to all output elements ────────────────────
+  const attachRemoteStream = useCallback((stream: MediaStream) => {
+    remoteStreamRef.current = stream;
+
+    // 1. Always attach audio tracks to the dedicated <audio> element
+    const audioOnly = new MediaStream(stream.getAudioTracks());
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = audioOnly;
+      playRemoteAudio();
+    }
+
+    // 2. For video calls, attach full stream to <video> element
+    if (call.isVideo) {
+      const attachVideo = () => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = stream;
+          remoteVideoRef.current.play().catch(() => {});
+          setRemoteVideoReady(true);
+        } else {
+          // Video element not mounted yet — retry after next render
+          setTimeout(attachVideo, 100);
+        }
+      };
+      attachVideo();
+    }
+  }, [call.isVideo, playRemoteAudio]);
+
+  // ── Pending ICE candidate drain ─────────────────────────────────────────────
   const applyPendingCandidates = useCallback(async () => {
-    if (!pcRef.current || pendingCandidates.current.length === 0) return;
-    const toApply = [...pendingCandidates.current];
+    if (!pcRef.current || !pendingCandidates.current.length) return;
+    const queue = [...pendingCandidates.current];
     pendingCandidates.current = [];
-    for (const candidate of toApply) {
-      try {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+    for (const c of queue) {
+      try { await pcRef.current.addIceCandidate(new RTCIceCandidate(c)); } catch {}
     }
   }, []);
 
-  const addOrBufferCandidate = useCallback(async (candidateData: RTCIceCandidateInit) => {
+  const addOrBufferCandidate = useCallback(async (cdata: RTCIceCandidateInit) => {
+    if (!cdata || !cdata.candidate) return; // skip empty/null candidates
     if (remoteDescSet.current && pcRef.current) {
-      try {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidateData));
-      } catch {}
+      try { await pcRef.current.addIceCandidate(new RTCIceCandidate(cdata)); } catch {}
     } else {
-      pendingCandidates.current.push(candidateData);
+      pendingCandidates.current.push(cdata);
     }
   }, []);
 
+  // ── Cleanup ─────────────────────────────────────────────────────────────────
   const endCallCleanup = useCallback(async (updateStatus = true) => {
     if (endedRef.current) return;
     endedRef.current = true;
 
-    // Record duration
     if (callStartTime.current) {
       const secs = Math.floor((Date.now() - callStartTime.current) / 1000);
       try {
-        await supabase.from('calls').update({ duration: secs, type: secs > 0 ? 'incoming' : 'missed' })
-          .eq('id', call.callId);
+        await supabase.from('calls').update({ duration: secs, type: secs > 0 ? 'incoming' : 'missed' }).eq('id', call.callId);
       } catch {}
     }
-
-    // Update signaling
     if (updateStatus) {
-      try {
-        await supabase.from('call_signals').update({ status: 'ended' }).eq('id', call.callId);
-      } catch {}
+      try { await supabase.from('call_signals').update({ status: 'ended' }).eq('id', call.callId); } catch {}
     }
 
-    // Stop media
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
-
-    // Silence the remote audio element
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = null;
-    }
-
-    // Close peer connection
+    if (remoteAudioRef.current) { remoteAudioRef.current.pause(); remoteAudioRef.current.srcObject = null; }
     try { pcRef.current?.close(); } catch {}
     pcRef.current = null;
-
-    // Remove all channels
-    channelsRef.current.forEach(ch => cleanupChanel(ch));
+    channelsRef.current.forEach(ch => { try { supabase.removeChannel(ch); } catch {} });
     channelsRef.current = [];
-  }, [call.callId, cleanupChanel]);
+  }, [call.callId]);
 
+  // ── Main WebRTC setup ───────────────────────────────────────────────────────
   useEffect(() => {
     let mounted = true;
 
     const startCall = async () => {
       if (!mounted) return;
+
+      // ── Step 1: Get microphone (+ camera for video calls) ──────────────────
+      let stream: MediaStream;
       try {
-        // Get user media
-        const constraints: MediaStreamConstraints = {
+        stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            sampleRate: 48000,
           },
           video: call.isVideo ? {
             width: { ideal: 1280, max: 1920 },
             height: { ideal: 720, max: 1080 },
             facingMode: 'user',
+            frameRate: { ideal: 30 },
           } : false,
-        };
-
-        let stream: MediaStream;
+        });
+      } catch (e1) {
+        // Retry with just audio
         try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch {
-          // Fallback: try audio only
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          } catch {
-            stream = new MediaStream();
-          }
-        }
-
-        if (!mounted) {
-          stream.getTracks().forEach(t => t.stop());
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch (e2) {
+          setCallStatus('Call Failed');
+          setConnectionError('Microphone access denied. Please allow mic permission.');
           return;
         }
+      }
 
-        localStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
+      if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
+      localStreamRef.current = stream;
+
+      // Show local video preview
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
+      }
+
+      // ── Step 2: Create PeerConnection ──────────────────────────────────────
+      const pc = new RTCPeerConnection(RTCServers);
+      pcRef.current = pc;
+
+      // ── CRITICAL FIX 1: Add ALL local tracks to the peer connection ────────
+      // Each track must be added individually with the full stream reference
+      // so the receiver gets both audio AND video streams in the same bundle
+      stream.getTracks().forEach(track => {
+        pc.addTrack(track, stream);
+        console.log('[WebRTC] Added local track:', track.kind, track.label);
+      });
+
+      // ── CRITICAL FIX 2: ontrack handler ───────────────────────────────────
+      // BUG WAS: used event.streams[0] which is undefined on some mobile browsers
+      // FIX: Build the remote stream from individual track events
+      // Also handle the case where multiple ontrack events arrive (one per track)
+      pc.ontrack = (event) => {
+        if (!mounted) return;
+        console.log('[WebRTC] ontrack fired:', event.track.kind, 'streams:', event.streams.length);
+
+        // Use event.streams[0] if available; otherwise build from tracks
+        let remoteStream = event.streams[0] ?? remoteStreamRef.current ?? new MediaStream();
+
+        if (!event.streams[0]) {
+          // Mobile fallback: manually add track to the stream
+          if (!remoteStreamRef.current) {
+            remoteStreamRef.current = new MediaStream();
+          }
+          remoteStreamRef.current.addTrack(event.track);
+          remoteStream = remoteStreamRef.current;
         }
 
-        // Create peer connection
-        const pc = new RTCPeerConnection(RTCServers);
-        pcRef.current = pc;
+        // Attach to output elements (retries if video element not yet mounted)
+        attachRemoteStream(remoteStream);
 
-        // Add tracks
-        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        setCallStatus('Connected');
+        if (!callStartTime.current) callStartTime.current = Date.now();
+        setIsReconnecting(false);
+        setConnectionError('');
+      };
 
-        // ── KEY FIX: ontrack handler ───────────────────────────────────────────
-        // For VOICE calls: remoteVideoRef.current is NULL (video element not rendered)
-        // We must always use remoteAudioRef for audio output.
-        pc.ontrack = (event) => {
-          const remoteStream = event.streams[0];
-          if (!remoteStream) return;
-
-          // Always attach to the hidden audio element
-          if (remoteAudioRef.current) {
-            remoteAudioRef.current.srcObject = remoteStream;
-            remoteAudioRef.current.volume = 1.0;
-            // Handle browser autoplay policy: show tap-to-unmute if blocked
-            remoteAudioRef.current.play().then(() => {
-              setNeedsAudioUnlock(false);
-            }).catch(() => {
-              // Autoplay blocked — show tap-to-unmute overlay
-              setNeedsAudioUnlock(true);
-            });
-          }
-
-          // Also attach to video element for video calls
-          if (call.isVideo && remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
-          }
-
+      // ── ICE connection monitoring ─────────────────────────────────────────
+      pc.oniceconnectionstatechange = () => {
+        if (!mounted) return;
+        const state = pc.iceConnectionState;
+        console.log('[WebRTC] ICE state:', state);
+        if (state === 'connected' || state === 'completed') {
           setCallStatus('Connected');
           if (!callStartTime.current) callStartTime.current = Date.now();
           setIsReconnecting(false);
           setConnectionError('');
-        };
+        } else if (state === 'failed') {
+          setIsReconnecting(true);
+          setCallStatus('Reconnecting...');
+          if (call.isCaller) pc.restartIce();
+        } else if (state === 'disconnected') {
+          setCallStatus('Reconnecting...');
+          setIsReconnecting(true);
+        } else if (state === 'closed') {
+          if (!endedRef.current) { setCallStatus('Ended'); setTimeout(onEndCall, 1000); }
+        }
+      };
 
-        // ICE connection state monitoring
-        pc.oniceconnectionstatechange = () => {
-          if (!mounted) return;
-          const state = pc.iceConnectionState;
-          if (state === 'connected' || state === 'completed') {
-            setCallStatus('Connected');
-            if (!callStartTime.current) callStartTime.current = Date.now();
-            setIsReconnecting(false);
-            setConnectionError('');
-          } else if (state === 'failed') {
-            setIsReconnecting(true);
-            setCallStatus('Reconnecting...');
-            // Try ICE restart
-            if (call.isCaller) {
-              pc.restartIce();
-            }
-          } else if (state === 'disconnected') {
-            setCallStatus('Reconnecting...');
-            setIsReconnecting(true);
-          } else if (state === 'closed') {
-            if (!endedRef.current) {
-              setCallStatus('Ended');
-              setTimeout(onEndCall, 1000);
-            }
-          }
-        };
+      pc.onconnectionstatechange = () => {
+        if (!mounted) return;
+        console.log('[WebRTC] Connection state:', pc.connectionState);
+        if (pc.connectionState === 'failed') {
+          setConnectionError('Connection failed. Check your network.');
+        }
+      };
 
-        pc.onconnectionstatechange = () => {
-          if (!mounted) return;
-          if (pc.connectionState === 'failed') {
-            setConnectionError('Connection failed. Poor network conditions.');
-          }
-        };
-
-        // ICE candidates → Supabase
-        pc.onicecandidate = async (event) => {
-          if (!mounted) return;
-          if (event.candidate) {
-            try {
-              await supabase.from('ice_candidates').insert({
-                signal_id: call.callId,
-                candidate: event.candidate.toJSON(),
-                role: call.isCaller ? 'caller' : 'receiver',
-              });
-            } catch {}
-          }
-        };
-
-        if (call.isCaller) {
-          // ── CALLER FLOW ──────────────────────────────────────────────────
-          const myUserId = (await supabase.auth.getUser()).data.user?.id || '';
-
-          await supabase.from('call_signals').upsert({
-            id: call.callId,
-            caller_id: myUserId,
-            receiver_id: call.contact.id,
-            is_video: call.isVideo,
-            status: 'calling',
-          }, { onConflict: 'id' });
-
-          if (!mounted) return;
-
-          if (pc.signalingState === 'closed') return;
-          const offerDesc = await pc.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: call.isVideo,
+      // ── ICE candidate → Supabase ──────────────────────────────────────────
+      pc.onicecandidate = async (event) => {
+        if (!mounted || !event.candidate) return;
+        try {
+          await supabase.from('ice_candidates').insert({
+            signal_id: call.callId,
+            candidate: event.candidate.toJSON(),
+            role: call.isCaller ? 'caller' : 'receiver',
           });
-          if (!mounted) return;
-          await pc.setLocalDescription(offerDesc);
+        } catch {}
+      };
 
-          // Push offer to DB
+      // ── CALLER FLOW ───────────────────────────────────────────────────────
+      if (call.isCaller) {
+        const myUserId = (await supabase.auth.getUser()).data.user?.id || '';
+
+        await supabase.from('call_signals').upsert({
+          id: call.callId,
+          caller_id: myUserId,
+          receiver_id: call.contact.id,
+          is_video: call.isVideo,
+          status: 'calling',
+        }, { onConflict: 'id' });
+
+        if (!mounted) return;
+        if (pc.signalingState === 'closed') return;
+
+        const offerDesc = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true, // always true — receiver decides what to send
+        });
+        await pc.setLocalDescription(offerDesc);
+
+        await supabase.from('call_signals').update({
+          offer: { sdp: offerDesc.sdp, type: offerDesc.type },
+        }).eq('id', call.callId);
+
+        // Listen for answer via realtime
+        const answerCh = supabase
+          .channel(`signal-answer-${call.callId}`)
+          .on('postgres_changes', {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'call_signals',
+            filter: `id=eq.${call.callId}`,
+          }, async (payload) => {
+            if (!mounted) return;
+            const data = payload.new as any;
+            if (!pc.currentRemoteDescription && data.answer) {
+              try {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                remoteDescSet.current = true;
+                await applyPendingCandidates();
+                setCallStatus('Ringing...');
+              } catch (e) { console.error('[WebRTC] setRemoteDescription error:', e); }
+            }
+            if (data.status === 'ended' || data.status === 'rejected') {
+              setCallStatus('Ended'); setTimeout(onEndCall, 1200);
+            }
+          })
+          .subscribe();
+        channelsRef.current.push(answerCh);
+
+        // Listen for receiver's ICE candidates
+        const iceCh = supabase
+          .channel(`ice-recv-${call.callId}`)
+          .on('postgres_changes', {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'ice_candidates',
+            filter: `signal_id=eq.${call.callId}`,
+          }, async (payload) => {
+            if (!mounted) return;
+            const c = payload.new as any;
+            // ── CRITICAL FIX 3: Filter correctly — caller wants RECEIVER candidates ──
+            if (c.role === 'receiver') {
+              await addOrBufferCandidate(c.candidate);
+            }
+          })
+          .subscribe();
+        channelsRef.current.push(iceCh);
+
+      } else {
+        // ── RECEIVER FLOW ────────────────────────────────────────────────────
+        setCallStatus('Connecting...');
+        let signalData: any = null;
+
+        // Subscribe realtime first to not miss the offer
+        const offerWaitCh = supabase
+          .channel(`offer-wait-${call.callId}`)
+          .on('postgres_changes', {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'call_signals',
+            filter: `id=eq.${call.callId}`,
+          }, async (payload) => {
+            if (!mounted || signalData) return;
+            const incoming = payload.new as any;
+            if (incoming.offer) signalData = incoming;
+          })
+          .subscribe();
+        channelsRef.current.push(offerWaitCh);
+
+        // Poll alongside (belt-and-suspenders): 400ms × 30 = 12s max
+        for (let attempt = 0; attempt < 30; attempt++) {
+          if (!mounted) return;
+          if (signalData) break;
+          const { data } = await supabase
+            .from('call_signals')
+            .select('offer, status')
+            .eq('id', call.callId)
+            .single();
+          if (data?.offer) { signalData = data; break; }
+          if (data?.status === 'ended') {
+            setCallStatus('Missed Call'); setTimeout(onEndCall, 1500); return;
+          }
+          if (attempt > 0) await new Promise(r => setTimeout(r, 400));
+        }
+
+        if (!mounted) return;
+        if (!signalData?.offer) {
+          setCallStatus('Call Failed');
+          setConnectionError('Could not receive call signal. Caller may have cancelled.');
+          return;
+        }
+
+        try {
+          if (pc.signalingState === 'closed') return;
+          await pc.setRemoteDescription(new RTCSessionDescription(signalData.offer));
+          remoteDescSet.current = true;
+          await applyPendingCandidates();
+
+          const answerDesc = await pc.createAnswer();
+          if (!mounted) return;
+          await pc.setLocalDescription(answerDesc);
+
           await supabase.from('call_signals').update({
-            offer: { sdp: offerDesc.sdp, type: offerDesc.type },
+            answer: { type: answerDesc.type, sdp: answerDesc.sdp },
+            status: 'connected',
           }).eq('id', call.callId);
 
-          // Listen for answer
-          const answerCh = supabase
-            .channel(`signal-answer-${call.callId}`)
-            .on('postgres_changes', {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'call_signals',
-              filter: `id=eq.${call.callId}`,
-            }, async (payload) => {
-              if (!mounted) return;
-              const data = payload.new as any;
-              if (!pc.currentRemoteDescription && data.answer) {
-                try {
-                  await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                  remoteDescSet.current = true;
-                  await applyPendingCandidates();
-                  setCallStatus('Ringing...');
-                } catch {}
-              }
-              if (data.status === 'connected') {
-                setCallStatus('Connected');
-                if (!callStartTime.current) callStartTime.current = Date.now();
-              }
-              if (data.status === 'ended' || data.status === 'rejected') {
-                setCallStatus('Ended');
-                setTimeout(onEndCall, 1200);
-              }
-            })
-            .subscribe();
-          channelsRef.current.push(answerCh);
-
-          // Listen for receiver's ICE candidates
-          const iceCh = supabase
-            .channel(`ice-receiver-${call.callId}`)
-            .on('postgres_changes', {
-              event: 'INSERT',
-              schema: 'public',
-              table: 'ice_candidates',
-              filter: `signal_id=eq.${call.callId}`,
-            }, async (payload) => {
-              if (!mounted) return;
-              const c = payload.new as any;
-              if (c.role === 'receiver') {
-                await addOrBufferCandidate(c.candidate);
-              }
-            })
-            .subscribe();
-          channelsRef.current.push(iceCh);
-
-        } else {
-          // ── RECEIVER FLOW ────────────────────────────────────────────────
-          // ── KEY FIX: Increase polling retries from 5×800ms (4s) to 15×1500ms (22.5s)
-          // The caller often takes >4s: microphone permission dialog + SDP creation
-          setCallStatus('Waiting for call signal...');
-
-          let signalData: any = null;
-
-          // Subscribe to realtime updates FIRST so we don't miss the offer
-          const offerWaitCh = supabase
-            .channel(`offer-wait-${call.callId}`)
-            .on('postgres_changes', {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'call_signals',
-              filter: `id=eq.${call.callId}`,
-            }, async (payload) => {
-              if (!mounted || signalData) return;
-              const incoming = payload.new as any;
-              if (incoming.offer && !signalData) {
-                signalData = incoming;
-              }
-            })
-            .subscribe();
-          channelsRef.current.push(offerWaitCh);
-
-          // Poll alongside realtime subscription (belt-and-suspenders)
-          // ── SPEED FIX: 400ms intervals × 30 attempts = 12s max (was 1500ms × 15 = 22.5s)
-          // First attempt is INSTANT (no wait before attempt 0)
-          for (let attempt = 0; attempt < 30; attempt++) {
-            if (!mounted) return;
-            if (signalData) break; // realtime already got it
-            const { data } = await supabase
-              .from('call_signals')
-              .select('offer, status')
-              .eq('id', call.callId)
-              .single();
-            if (data?.offer) { signalData = data; break; }
-            if (data?.status === 'ended') {
-              setCallStatus('Missed Call');
-              setTimeout(onEndCall, 1500);
-              return;
-            }
-            // Wait 400ms before next poll (first iteration = instant check)
-            if (attempt === 0) continue;
-            await new Promise(r => setTimeout(r, 400));
-          }
-
-          if (!mounted) return;
-
-          if (!signalData?.offer) {
-            setCallStatus('Call Failed');
-            setConnectionError('Could not fetch call signal. Caller may have cancelled.');
-            return;
-          }
-
-          setCallStatus('Connecting...');
-
-          try {
-            if (pc.signalingState === 'closed') return;
-            await pc.setRemoteDescription(new RTCSessionDescription(signalData.offer));
-            remoteDescSet.current = true;
-            await applyPendingCandidates();
-
-            const answerDesc = await pc.createAnswer();
-            if (!mounted) return;
-            await pc.setLocalDescription(answerDesc);
-
-            await supabase.from('call_signals').update({
-              answer: { type: answerDesc.type, sdp: answerDesc.sdp },
-              status: 'connected',
-            }).eq('id', call.callId);
-
-            setCallStatus('Ringing...');
-          } catch (err) {
-            setCallStatus('Call Failed');
-            setConnectionError('Could not establish connection.');
-            return;
-          }
-
-          // Watch for ended signal
-          const statusCh = supabase
-            .channel(`signal-status-${call.callId}`)
-            .on('postgres_changes', {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'call_signals',
-              filter: `id=eq.${call.callId}`,
-            }, (payload) => {
-              if (!mounted) return;
-              const data = payload.new as any;
-              if (data.status === 'ended') {
-                setCallStatus('Ended');
-                setTimeout(onEndCall, 1200);
-              }
-            })
-            .subscribe();
-          channelsRef.current.push(statusCh);
-
-          // Listen for caller ICE candidates
-          const iceCh = supabase
-            .channel(`ice-caller-${call.callId}`)
-            .on('postgres_changes', {
-              event: 'INSERT',
-              schema: 'public',
-              table: 'ice_candidates',
-              filter: `signal_id=eq.${call.callId}`,
-            }, async (payload) => {
-              if (!mounted) return;
-              const c = payload.new as any;
-              if (c.role === 'caller') {
-                await addOrBufferCandidate(c.candidate);
-              }
-            })
-            .subscribe();
-          channelsRef.current.push(iceCh);
+        } catch (err) {
+          console.error('[WebRTC] Receiver SDP error:', err);
+          setCallStatus('Call Failed');
+          setConnectionError('Could not establish connection.');
+          return;
         }
-      } catch (err) {
-        if (!mounted) return;
-        console.error('Call setup error:', err);
-        setCallStatus('Call Failed');
-        setConnectionError('Could not start call. Check mic/camera permissions.');
+
+        // Watch for ended
+        const statusCh = supabase
+          .channel(`signal-status-${call.callId}`)
+          .on('postgres_changes', {
+            event: 'UPDATE', schema: 'public', table: 'call_signals',
+            filter: `id=eq.${call.callId}`,
+          }, (payload) => {
+            if (!mounted) return;
+            const data = payload.new as any;
+            if (data.status === 'ended') { setCallStatus('Ended'); setTimeout(onEndCall, 1200); }
+          })
+          .subscribe();
+        channelsRef.current.push(statusCh);
+
+        // Listen for caller's ICE candidates
+        const iceCh = supabase
+          .channel(`ice-caller-${call.callId}`)
+          .on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'ice_candidates',
+            filter: `signal_id=eq.${call.callId}`,
+          }, async (payload) => {
+            if (!mounted) return;
+            const c = payload.new as any;
+            // ── CRITICAL FIX 3: Filter correctly — receiver wants CALLER candidates ──
+            if (c.role === 'caller') {
+              await addOrBufferCandidate(c.candidate);
+            }
+          })
+          .subscribe();
+        channelsRef.current.push(iceCh);
       }
     };
 
-    startCall();
+    startCall().catch(err => {
+      console.error('[WebRTC] startCall error:', err);
+      setCallStatus('Call Failed');
+      setConnectionError('Could not start call. Check mic/camera permissions.');
+    });
 
     return () => {
       mounted = false;
@@ -570,7 +535,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Call duration counter
+  // ── Duration timer ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (callStatus !== 'Connected') return;
     const interval = setInterval(() => setDuration(d => d + 1), 1000);
@@ -580,63 +545,50 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const formatDuration = (s: number) =>
     `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
 
+  // ── Control handlers ────────────────────────────────────────────────────────
   const handleEndCall = useCallback(async () => {
     await endCallCleanup(true);
     onEndCall();
   }, [endCallCleanup, onEndCall]);
 
   const handleToggleMute = () => {
-    const stream = localStreamRef.current;
-    if (stream) {
-      stream.getAudioTracks().forEach(t => (t.enabled = !t.enabled));
-      setIsMuted(p => !p);
-    }
+    localStreamRef.current?.getAudioTracks().forEach(t => (t.enabled = !t.enabled));
+    setIsMuted(p => !p);
   };
 
   const handleToggleCamera = () => {
-    const stream = localStreamRef.current;
-    if (stream) {
-      stream.getVideoTracks().forEach(t => (t.enabled = !t.enabled));
-      setIsCameraOn(p => !p);
+    localStreamRef.current?.getVideoTracks().forEach(t => (t.enabled = !t.enabled));
+    setIsCameraOn(p => !p);
+  };
+
+  const handleToggleSpeaker = async () => {
+    const next = !isSpeakerOn;
+    setIsSpeakerOn(next);
+    const audioEl = remoteAudioRef.current;
+    if (!audioEl) return;
+    if ('setSinkId' in HTMLAudioElement.prototype) {
+      try {
+        if (next) {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const speaker = devices.filter(d => d.kind === 'audiooutput')
+            .find(d => d.label.toLowerCase().includes('speaker')) || { deviceId: '' };
+          await (audioEl as any).setSinkId(speaker.deviceId);
+        } else {
+          await (audioEl as any).setSinkId('default');
+        }
+      } catch {}
     }
   };
 
-  // ── KEY FIX: Speaker toggle actually routes audio ────────────────────────────
-  // Uses setSinkId API to switch between earpiece (default) and speaker.
-  // Falls back gracefully if the browser doesn't support it (e.g. iOS Safari).
-  const handleToggleSpeaker = async () => {
-    const nextState = !isSpeakerOn;
-    setIsSpeakerOn(nextState);
-
-    const audioEl = remoteAudioRef.current;
-    if (!audioEl) return;
-
-    // setSinkId is supported in Chrome/Edge on desktop and Android Chrome
-    if ('setSinkId' in HTMLAudioElement.prototype) {
-      try {
-        if (nextState) {
-          // Get all audio output devices and find the best speaker option
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const outputs = devices.filter(d => d.kind === 'audiooutput');
-          // Prefer: communications > speakerphone > anything that's not default earpiece
-          const speaker =
-            outputs.find(d => d.label.toLowerCase().includes('speaker')) ||
-            outputs.find(d => d.deviceId !== 'default' && d.deviceId !== '') ||
-            outputs[0];
-          if (speaker) {
-            await (audioEl as any).setSinkId(speaker.deviceId);
-          }
-        } else {
-          // Revert to system default (usually earpiece on mobile)
-          await (audioEl as any).setSinkId('default');
-        }
-      } catch {
-        // setSinkId failed — permission denied or device not found
-        // Audio still plays, just can't switch output
-      }
+  const handleAudioUnlock = async () => {
+    const el = remoteAudioRef.current;
+    if (!el) return;
+    // If srcObject was lost, re-attach
+    if (!el.srcObject && remoteStreamRef.current) {
+      const audioOnly = new MediaStream(remoteStreamRef.current.getAudioTracks());
+      el.srcObject = audioOnly;
     }
-    // Note: iOS Safari doesn't support setSinkId at all.
-    // The button still shows visually but has no effect on iOS.
+    try { await el.play(); setNeedsAudioUnlock(false); } catch {}
   };
 
   const isConnected = callStatus === 'Connected';
@@ -645,37 +597,48 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   return (
     <div className="fixed inset-0 bg-slate-950 z-50 flex flex-col items-center text-white overflow-hidden">
 
-      {/* ── Hidden audio element — ALWAYS RENDERED ───────────────────────────
-           This is the key fix for voice calls. When call.isVideo is false,
-           remoteVideoRef is not bound to any DOM element (the video element
-           only renders in the video branch below). This hidden <audio> element
-           is always in the DOM and always receives the remote MediaStream,
-           ensuring audio plays for BOTH voice and video calls.
-      ─────────────────────────────────────────────────────────────────────── */}
-      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      {/* ── ALWAYS-RENDERED hidden audio element for remote audio ──────────────
+          This is mounted unconditionally so remoteAudioRef.current is NEVER null
+          when ontrack fires. Audio works for BOTH voice-only and video calls.
+      ────────────────────────────────────────────────────────────────────────── */}
+      <audio
+        ref={remoteAudioRef}
+        autoPlay
+        playsInline
+        controls={false}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+      />
 
-      {/* ── Tap-to-unmute overlay: shown when browser autoplay is blocked ────── */}
+      {/* Tap to hear audio — autoplay unlock */}
       {needsAudioUnlock && (
         <button
-          onClick={() => {
-            if (remoteAudioRef.current) {
-              remoteAudioRef.current.play().then(() => setNeedsAudioUnlock(false)).catch(() => {});
-            }
-          }}
-          className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-amber-500/90 backdrop-blur-sm text-white text-sm font-bold px-4 py-2.5 rounded-2xl shadow-xl animate-bounce"
+          onClick={handleAudioUnlock}
+          className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-amber-500/95 backdrop-blur-sm text-white text-sm font-black px-5 py-3 rounded-2xl shadow-2xl animate-bounce border border-amber-400/30"
         >
-          <Volume2 size={16} />
-          Tap to hear audio
+          <Volume2 size={18} />
+          Tap to enable audio
         </button>
       )}
 
       {/* Background */}
       <div className="absolute inset-0 z-0">
         {call.isVideo ? (
-          <div className="w-full h-full relative">
-            <video ref={remoteVideoRef} autoPlay playsInline
-              className="w-full h-full object-cover"
-              poster={call.contact.avatarUrl} />
+          <div className="w-full h-full relative bg-slate-900">
+            {/* Remote video — ALWAYS rendered in video mode so ref is always populated */}
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className={`w-full h-full object-cover transition-opacity duration-500 ${remoteVideoReady ? 'opacity-100' : 'opacity-0'}`}
+            />
+            {/* Poster / placeholder until remote video arrives */}
+            {!remoteVideoReady && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <img src={call.contact.avatarUrl} alt={call.contact.name}
+                  className="w-40 h-40 rounded-full object-cover border-4 border-white/10 shadow-2xl blur-sm opacity-50"
+                  referrerPolicy="no-referrer" />
+              </div>
+            )}
             <div className="absolute inset-0 bg-gradient-to-b from-slate-950/60 via-transparent to-slate-950/80" />
           </div>
         ) : (
@@ -764,7 +727,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
             )}
 
             <button onClick={handleToggleSpeaker}
-              className={`w-16 h-16 rounded-3xl flex items-center justify-center transition-all shadow-xl ${isSpeakerOn ? 'bg-white text-slate-950 shadow-white/20' : 'bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/10'}`}>
+              className={`w-16 h-16 rounded-3xl flex items-center justify-center transition-all shadow-xl ${isSpeakerOn ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/10'}`}>
               {isSpeakerOn ? <Volume2 size={24} /> : <VolumeX size={24} />}
             </button>
 
@@ -784,7 +747,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
                 <span className="text-xs font-bold">Reconnecting...</span>
               </div>
             )}
-            <button className="px-6 py-3 rounded-2xl hover:bg-white/10 transition-all flex items-center gap-2 hover:text-white" title="In-call chat (coming soon)">
+            <button className="px-6 py-3 rounded-2xl hover:bg-white/10 transition-all flex items-center gap-2 hover:text-white" title="In-call chat">
               <MessageSquare size={18} />
               <span className="uppercase tracking-widest font-bold">Chat</span>
             </button>
