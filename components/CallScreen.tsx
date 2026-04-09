@@ -151,6 +151,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const [isCameraOn, setIsCameraOn] = useState(call.isVideo);
   const [connectionError, setConnectionError] = useState('');
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false); // browser autoplay blocked
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -283,16 +284,21 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         // ── KEY FIX: ontrack handler ───────────────────────────────────────────
         // For VOICE calls: remoteVideoRef.current is NULL (video element not rendered)
         // We must always use remoteAudioRef for audio output.
-        // For VIDEO calls: also connect to the video element.
         pc.ontrack = (event) => {
           const remoteStream = event.streams[0];
           if (!remoteStream) return;
 
-          // Always attach to the hidden audio element — ensures audio plays
-          // for BOTH voice and video calls
+          // Always attach to the hidden audio element
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = remoteStream;
-            remoteAudioRef.current.play().catch(() => {});
+            remoteAudioRef.current.volume = 1.0;
+            // Handle browser autoplay policy: show tap-to-unmute if blocked
+            remoteAudioRef.current.play().then(() => {
+              setNeedsAudioUnlock(false);
+            }).catch(() => {
+              // Autoplay blocked — show tap-to-unmute overlay
+              setNeedsAudioUnlock(true);
+            });
           }
 
           // Also attach to video element for video calls
@@ -457,7 +463,9 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           channelsRef.current.push(offerWaitCh);
 
           // Poll alongside realtime subscription (belt-and-suspenders)
-          for (let attempt = 0; attempt < 15; attempt++) {
+          // ── SPEED FIX: 400ms intervals × 30 attempts = 12s max (was 1500ms × 15 = 22.5s)
+          // First attempt is INSTANT (no wait before attempt 0)
+          for (let attempt = 0; attempt < 30; attempt++) {
             if (!mounted) return;
             if (signalData) break; // realtime already got it
             const { data } = await supabase
@@ -471,7 +479,9 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
               setTimeout(onEndCall, 1500);
               return;
             }
-            await new Promise(r => setTimeout(r, 1500));
+            // Wait 400ms before next poll (first iteration = instant check)
+            if (attempt === 0) continue;
+            await new Promise(r => setTimeout(r, 400));
           }
 
           if (!mounted) return;
@@ -643,6 +653,21 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
            ensuring audio plays for BOTH voice and video calls.
       ─────────────────────────────────────────────────────────────────────── */}
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+
+      {/* ── Tap-to-unmute overlay: shown when browser autoplay is blocked ────── */}
+      {needsAudioUnlock && (
+        <button
+          onClick={() => {
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.play().then(() => setNeedsAudioUnlock(false)).catch(() => {});
+            }
+          }}
+          className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-amber-500/90 backdrop-blur-sm text-white text-sm font-bold px-4 py-2.5 rounded-2xl shadow-xl animate-bounce"
+        >
+          <Volume2 size={16} />
+          Tap to hear audio
+        </button>
+      )}
 
       {/* Background */}
       <div className="absolute inset-0 z-0">

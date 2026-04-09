@@ -1,10 +1,9 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../supabase';
 
-// ─── Room WebRTC Audio Engine ─────────────────────────────────────────────────
-// Creates a full-mesh audio network between all seated participants.
-// Each user creates peer connections to every OTHER seated user.
-// Signaling is done via a dedicated room_rtc_signals table (or using room_messages type='webrtc').
+// ─── Room WebRTC Audio Engine v2 ──────────────────────────────────────────────
+// Full-mesh audio with active speaker detection via Web Audio API.
+// Signals go through a dedicated room_signals table (not chat messages).
 
 const RTC_SERVERS: RTCConfiguration = {
   iceServers: [
@@ -12,6 +11,7 @@ const RTC_SERVERS: RTCConfiguration = {
     {
       urls: [
         'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:80?transport=tcp',
         'turn:openrelay.metered.ca:443',
         'turn:openrelay.metered.ca:443?transport=tcp',
       ],
@@ -19,15 +19,18 @@ const RTC_SERVERS: RTCConfiguration = {
       credential: 'openrelayproject',
     },
   ],
-  iceCandidatePoolSize: 10,
+  iceCandidatePoolSize: 16,
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
 };
 
 interface UseRoomAudioOptions {
   roomId: string;
   myUserId: string;
-  seatedUserIds: string[]; // all seated users (including myself)
+  seatedUserIds: string[];
   isMuted: boolean;
-  isEnabled: boolean; // only true when the user is seated
+  isEnabled: boolean;
+  onSpeakingChange?: (userId: string, isSpeaking: boolean) => void;
 }
 
 export function useRoomAudio({
@@ -36,36 +39,94 @@ export function useRoomAudio({
   seatedUserIds,
   isMuted,
   isEnabled,
+  onSpeakingChange,
 }: UseRoomAudioOptions) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const channelRef = useRef<any>(null);
   const pendingCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRefs = useRef<Map<string, AnalyserNode>>(new Map());
+  const speakingTimers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  // ── Active speaker detection ────────────────────────────────────────────────
+  const startSpeakingDetection = useCallback((userId: string, stream: MediaStream) => {
+    if (!onSpeakingChange) return;
+    try {
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new AudioContext();
+      }
+      const ctx = audioCtxRef.current;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      analyserRefs.current.set(userId, analyser);
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const THRESHOLD = 20;
+
+      const timer = setInterval(() => {
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((s, v) => s + v, 0) / data.length;
+        onSpeakingChange(userId, avg > THRESHOLD);
+      }, 100);
+      speakingTimers.current.set(userId, timer);
+    } catch {
+      // AudioContext not available
+    }
+  }, [onSpeakingChange]);
+
+  const stopSpeakingDetection = useCallback((userId: string) => {
+    const timer = speakingTimers.current.get(userId);
+    if (timer) { clearInterval(timer); speakingTimers.current.delete(userId); }
+    analyserRefs.current.delete(userId);
+    onSpeakingChange?.(userId, false);
+  }, [onSpeakingChange]);
 
   const cleanup = useCallback(() => {
+    // Stop local media
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
+
+    // Close all peer connections
     pcsRef.current.forEach(pc => { try { pc.close(); } catch {} });
     pcsRef.current.clear();
-    remoteAudiosRef.current.forEach(audio => { audio.srcObject = null; audio.remove(); });
+
+    // Remove all remote audio elements
+    remoteAudiosRef.current.forEach(audio => {
+      audio.srcObject = null;
+      audio.remove();
+    });
     remoteAudiosRef.current.clear();
+
+    // Stop speaking detection
+    speakingTimers.current.forEach((timer) => clearInterval(timer));
+    speakingTimers.current.clear();
+    analyserRefs.current.clear();
+
+    // Close AudioContext
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+
+    // Remove realtime channel
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
     }
   }, []);
 
+  // ── Send WebRTC signal via Supabase Realtime broadcast (no DB write) ────────
   const sendSignal = useCallback(async (to: string, payload: any) => {
-    await supabase.from('room_messages').insert({
-      room_id: roomId,
-      sender_id: myUserId,
-      sender_name: '__webrtc__',
-      text: JSON.stringify({ to, from: myUserId, ...payload }),
-      timestamp: new Date().toISOString(),
-      mentions: ['__webrtc__'],
+    if (!channelRef.current) return;
+    channelRef.current.send({
+      type: 'broadcast',
+      event: 'webrtc',
+      payload: { to, from: myUserId, ...payload },
     });
-  }, [roomId, myUserId]);
+  }, [myUserId]);
 
   const createPeerConnection = useCallback((remoteUserId: string, isCaller: boolean) => {
     if (pcsRef.current.has(remoteUserId)) return pcsRef.current.get(remoteUserId)!;
@@ -80,19 +141,28 @@ export function useRoomAudio({
       });
     }
 
-    // Handle remote audio
+    // Handle incoming remote stream
     pc.ontrack = (event) => {
+      const remoteStream = event.streams[0];
+      if (!remoteStream) return;
+
+      // Create or reuse audio element
       let audio = remoteAudiosRef.current.get(remoteUserId);
       if (!audio) {
         audio = new Audio();
         audio.autoplay = true;
+        audio.playsInline = true;
         document.body.appendChild(audio);
         remoteAudiosRef.current.set(remoteUserId, audio);
       }
-      audio.srcObject = event.streams[0];
+      audio.srcObject = remoteStream;
+      audio.play().catch(() => {});
+
+      // Start active speaker detection for this peer
+      startSpeakingDetection(remoteUserId, remoteStream);
     };
 
-    // Send ICE candidates
+    // Buffer ICE candidates until remote description is set
     pc.onicecandidate = async (event) => {
       if (event.candidate) {
         await sendSignal(remoteUserId, {
@@ -102,19 +172,14 @@ export function useRoomAudio({
       }
     };
 
-    // Apply pending ICE candidates
-    pc.onconnectionstatechange = async () => {
-      const pending = pendingCandidates.current.get(remoteUserId) || [];
-      if (pc.remoteDescription && pending.length > 0) {
-        for (const c of pending) {
-          try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
-        }
-        pendingCandidates.current.set(remoteUserId, []);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') {
+        // Try to reconnect
+        pc.restartIce();
       }
     };
 
     if (isCaller) {
-      // Create and send offer
       pc.createOffer({ offerToReceiveAudio: true })
         .then(offer => pc.setLocalDescription(offer))
         .then(() => sendSignal(remoteUserId, {
@@ -125,20 +190,21 @@ export function useRoomAudio({
     }
 
     return pc;
-  }, [sendSignal]);
+  }, [sendSignal, startSpeakingDetection]);
 
   const handleSignal = useCallback(async (signal: any) => {
     const { from, to, type, sdp, candidate } = signal;
-    if (to !== myUserId) return; // Not for me
+    if (to !== myUserId) return;
 
     if (type === 'offer') {
       const pc = createPeerConnection(from, false);
+      if (pc.signalingState !== 'stable') return;
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await sendSignal(from, { type: 'answer', sdp: answer.sdp });
 
-      // Apply pending ICE candidates
+      // Apply buffered ICE candidates
       const pending = pendingCandidates.current.get(from) || [];
       for (const c of pending) {
         try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
@@ -149,7 +215,6 @@ export function useRoomAudio({
       const pc = pcsRef.current.get(from);
       if (pc && pc.signalingState !== 'stable') {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-        // Apply pending ICE candidates
         const pending = pendingCandidates.current.get(from) || [];
         for (const c of pending) {
           try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
@@ -162,7 +227,6 @@ export function useRoomAudio({
       if (pc && pc.remoteDescription) {
         try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
       } else {
-        // Buffer until offer/answer processed
         const existing = pendingCandidates.current.get(from) || [];
         pendingCandidates.current.set(from, [...existing, candidate]);
       }
@@ -184,45 +248,39 @@ export function useRoomAudio({
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            sampleRate: { ideal: 48000 },
           },
           video: false,
         });
         if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
         localStreamRef.current = stream;
-
-        // Mute/unmute
         stream.getAudioTracks().forEach(t => (t.enabled = !isMuted));
 
-        // Connect to all other seated users (lower userId = caller to avoid both creating offers)
-        const otherSeated = seatedUserIds.filter(id => id !== myUserId);
-        for (const remoteId of otherSeated) {
-          const isCaller = myUserId < remoteId; // deterministic: lower ID calls
-          createPeerConnection(remoteId, isCaller);
-        }
+        // Start self speaking detection
+        startSpeakingDetection(myUserId, stream);
 
-        // Subscribe to WebRTC signals via room_messages
+        // Open a Realtime channel for WebRTC broadcast signaling (no DB writes needed!)
         const channel = supabase
-          .channel(`room-rtc-${roomId}-${myUserId}`)
-          .on('postgres_changes', {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'room_messages',
-            filter: `room_id=eq.${roomId}`,
-          }, (payload) => {
-            const row = payload.new as any;
-            if (row.sender_name !== '__webrtc__') return;
-            try {
-              const signal = JSON.parse(row.text);
-              if (signal.to === myUserId) {
-                handleSignal(signal);
-              }
-            } catch {}
+          .channel(`room-mesh-${roomId}`, {
+            config: { broadcast: { self: false } },
           })
-          .subscribe();
+          .on('broadcast', { event: 'webrtc' }, ({ payload }) => {
+            if (payload.to === myUserId) handleSignal(payload);
+          })
+          .subscribe(async (status) => {
+            if (status === 'SUBSCRIBED' && mounted) {
+              // Connect to all other seated users
+              const others = seatedUserIds.filter(id => id !== myUserId);
+              for (const remoteId of others) {
+                const isCaller = myUserId < remoteId;
+                createPeerConnection(remoteId, isCaller);
+              }
+            }
+          });
 
         channelRef.current = channel;
       } catch (err) {
-        console.warn('Room audio: microphone access denied or unavailable:', err);
+        console.warn('Room audio: mic access denied:', err);
       }
     };
 
@@ -240,9 +298,10 @@ export function useRoomAudio({
     localStreamRef.current?.getAudioTracks().forEach(t => {
       t.enabled = !isMuted;
     });
-  }, [isMuted]);
+    // Notify self-detection
+    onSpeakingChange?.(myUserId, !isMuted);
+  }, [isMuted, myUserId, onSpeakingChange]);
 
-  // Handle new user joining (create connection to them if I'm already seated)
   const connectToNewUser = useCallback((remoteUserId: string) => {
     if (!isEnabled || !localStreamRef.current) return;
     if (pcsRef.current.has(remoteUserId)) return;
@@ -250,13 +309,13 @@ export function useRoomAudio({
     createPeerConnection(remoteUserId, isCaller);
   }, [isEnabled, myUserId, createPeerConnection]);
 
-  // Disconnect from a user who left
   const disconnectFromUser = useCallback((remoteUserId: string) => {
     const pc = pcsRef.current.get(remoteUserId);
     if (pc) { try { pc.close(); } catch {} pcsRef.current.delete(remoteUserId); }
     const audio = remoteAudiosRef.current.get(remoteUserId);
     if (audio) { audio.srcObject = null; audio.remove(); remoteAudiosRef.current.delete(remoteUserId); }
-  }, []);
+    stopSpeakingDetection(remoteUserId);
+  }, [stopSpeakingDetection]);
 
   return { connectToNewUser, disconnectFromUser };
 }

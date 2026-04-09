@@ -1,15 +1,250 @@
-
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  X, Mic, MicOff, Lock, Unlock, UserPlus, Share2, Send,
-  UserMinus, MessageSquare, Shield, UserCheck, Copy, Check,
-  Plus, Volume2, VolumeX, Video, VideoOff, Crown, Settings,
-  Ban, Bell, ChevronDown, AtSign, Users, Radio,
+  X, Mic, MicOff, Hand, MessageSquare, LogOut, Crown, Shield,
+  UserPlus, UserMinus, Lock, Unlock, Users, Radio, Send, ChevronDown,
+  MoreVertical, Volume2, VolumeX, Smile, Share2, Pin, Trash2, Copy,
 } from 'lucide-react';
-import { supabase, handleSupabaseError } from '../supabase';
-import type { Room, User, Contact, Seat, RoomMessage, RoomParticipant } from '../types';
+import { supabase } from '../supabase';
+import type { Room, User, Contact, Seat } from '../types';
 import { useRoomAudio } from '../hooks/useRoomAudio';
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+type Role = 'host' | 'co-host' | 'speaker' | 'listener';
+
+interface Participant {
+  userId: string;
+  name: string;
+  avatar: string;
+  role: Role;
+  isMuted: boolean;
+  isSpeaking: boolean;
+  joinedAt: string;
+}
+
+interface ChatMsg {
+  id: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar: string;
+  text: string;
+  type: 'user' | 'system';
+  timestamp: string;
+  isHost?: boolean;
+  isCoHost?: boolean;
+  isPinned?: boolean;
+}
+
+interface HandRaise {
+  id: string;
+  userId: string;
+  userName: string;
+  userAvatar: string;
+  raisedAt: string;
+}
+
+const EMOJI_REACTIONS = ['❤️', '🔥', '👏', '😂', '🎉', '💯'];
+const CATEGORIES = ['General', 'Tech', 'Business', 'Finance', 'Music', 'Gaming', 'Education', 'Health'];
+
+// ─── Role badge ───────────────────────────────────────────────────────────────
+const RoleBadge: React.FC<{ role: Role }> = ({ role }) => {
+  if (role === 'host') return <Crown size={10} className="text-amber-400" />;
+  if (role === 'co-host') return <Shield size={10} className="text-blue-400" />;
+  return null;
+};
+
+// ─── Speaking ring animation ─────────────────────────────────────────────────
+const SpeakingRing: React.FC<{ active: boolean }> = ({ active }) => (
+  active ? (
+    <div className="absolute inset-0 rounded-full border-[3px] border-emerald-400 animate-pulse" />
+  ) : null
+);
+
+// ─── Speaker Seat Card ────────────────────────────────────────────────────────
+const SeatCard: React.FC<{
+  seat: Seat;
+  participant?: Participant;
+  myId: string;
+  myRole: Role;
+  isSpeaking: boolean;
+  onRemove: (userId: string) => void;
+  onMute: (userId: string) => void;
+  onMakeCoHost: (userId: string) => void;
+  onSitDown: (seatNum: number) => void;
+  onSendFriendRequest?: (userId: string, name: string, avatar: string) => void;
+}> = ({ seat, participant, myId, myRole, isSpeaking, onRemove, onMute, onMakeCoHost, onSitDown, onSendFriendRequest }) => {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isMe = participant?.userId === myId;
+  const canModerate = myRole === 'host' || myRole === 'co-host';
+
+  return (
+    <div className="flex flex-col items-center gap-1.5 w-[60px]">
+      <button
+        onClick={() => !participant ? onSitDown(seat.id) : setMenuOpen(m => !m)}
+        className="relative w-14 h-14 rounded-full focus:outline-none"
+      >
+        {participant ? (
+          <>
+            <SpeakingRing active={isSpeaking && !participant.isMuted} />
+            <img
+              src={participant.avatar}
+              alt={participant.name}
+              className="w-14 h-14 rounded-full object-cover border-2 border-white/10"
+              referrerPolicy="no-referrer"
+            />
+            {/* Muted indicator */}
+            {participant.isMuted && (
+              <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center border-2 border-gray-950">
+                <MicOff size={9} className="text-white" />
+              </div>
+            )}
+            {/* Role badge */}
+            <div className="absolute -top-0.5 -left-0.5 w-4 h-4 bg-gray-900 rounded-full flex items-center justify-center border border-white/10">
+              <RoleBadge role={participant.role} />
+            </div>
+            {/* Me indicator */}
+            {isMe && (
+              <div className="absolute -bottom-0.5 -left-0.5 w-4 h-4 bg-emerald-500 rounded-full border-2 border-gray-950" />
+            )}
+          </>
+        ) : (
+          <div className="w-14 h-14 rounded-full bg-white/5 border-2 border-white/10 border-dashed flex items-center justify-center hover:border-emerald-500/50 hover:bg-emerald-500/5 transition-all">
+            <UserPlus size={16} className="text-white/20" />
+          </div>
+        )}
+      </button>
+
+      <span className="text-[10px] text-white/70 text-center truncate w-full leading-tight">
+        {participant ? participant.name.split(' ')[0] : `Seat ${seat.id}`}
+      </span>
+
+      {/* Context menu */}
+      {menuOpen && participant && (
+        <div className="absolute z-50 bg-gray-800 border border-white/10 rounded-2xl shadow-2xl p-1 min-w-[160px] top-full mt-1 left-1/2 -translate-x-1/2">
+          {!isMe && onSendFriendRequest && (
+            <button
+              onClick={() => { onSendFriendRequest(participant.userId, participant.name, participant.avatar); setMenuOpen(false); }}
+              className="w-full text-left px-3 py-2 text-sm text-white/80 hover:bg-white/10 rounded-xl flex items-center gap-2"
+            >
+              <UserPlus size={14} /> Add Friend
+            </button>
+          )}
+          {canModerate && !isMe && (
+            <>
+              <button
+                onClick={() => { onMute(participant.userId); setMenuOpen(false); }}
+                className="w-full text-left px-3 py-2 text-sm text-white/80 hover:bg-white/10 rounded-xl flex items-center gap-2"
+              >
+                {participant.isMuted ? <Volume2 size={14} /> : <VolumeX size={14} />}
+                {participant.isMuted ? 'Unmute' : 'Mute'}
+              </button>
+              {myRole === 'host' && (
+                <button
+                  onClick={() => { onMakeCoHost(participant.userId); setMenuOpen(false); }}
+                  className="w-full text-left px-3 py-2 text-sm text-blue-400 hover:bg-white/10 rounded-xl flex items-center gap-2"
+                >
+                  <Shield size={14} /> Make Co-host
+                </button>
+              )}
+              <button
+                onClick={() => { onRemove(participant.userId); setMenuOpen(false); }}
+                className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 rounded-xl flex items-center gap-2"
+              >
+                <UserMinus size={14} /> Remove
+              </button>
+            </>
+          )}
+          <button onClick={() => setMenuOpen(false)} className="w-full text-left px-3 py-2 text-xs text-white/30 hover:bg-white/5 rounded-xl">
+            Close
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Chat Message ─────────────────────────────────────────────────────────────
+const ChatMessage: React.FC<{ msg: ChatMsg; myId: string }> = ({ msg, myId }) => {
+  const isMe = msg.senderId === myId;
+
+  if (msg.type === 'system') {
+    return (
+      <div className="flex justify-center my-1">
+        <span className="text-[11px] text-white/30 bg-white/5 px-3 py-1 rounded-full">{msg.text}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex gap-2 max-w-[85%] ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
+      <img
+        src={msg.senderAvatar}
+        alt={msg.senderName}
+        className="w-7 h-7 rounded-full flex-shrink-0 object-cover border border-white/10 mt-1"
+        referrerPolicy="no-referrer"
+      />
+      <div>
+        <div className={`flex items-center gap-1 mb-0.5 ${isMe ? 'justify-end' : ''}`}>
+          <span className={`text-[10px] font-bold ${msg.isHost ? 'text-amber-400' : msg.isCoHost ? 'text-blue-400' : 'text-white/50'}`}>
+            {isMe ? 'You' : msg.senderName}
+          </span>
+          {msg.isHost && <Crown size={9} className="text-amber-400" />}
+          {msg.isCoHost && !msg.isHost && <Shield size={9} className="text-blue-400" />}
+        </div>
+        <div className={`px-3 py-2 rounded-2xl text-sm ${
+          isMe
+            ? 'bg-emerald-600 text-white rounded-tr-sm'
+            : 'bg-white/10 text-white/90 rounded-tl-sm'
+        }`}>
+          {msg.text}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Hand Raise Queue ─────────────────────────────────────────────────────────
+const HandRaiseQueue: React.FC<{
+  raises: HandRaise[];
+  myRole: Role;
+  onAccept: (userId: string) => void;
+  onReject: (userId: string) => void;
+}> = ({ raises, myRole, onAccept, onReject }) => {
+  const canAct = myRole === 'host' || myRole === 'co-host';
+  if (raises.length === 0) return null;
+
+  return (
+    <div className="absolute bottom-20 left-0 right-0 mx-4 bg-gray-800/95 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl overflow-hidden z-40">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10">
+        <div className="flex items-center gap-2">
+          <Hand size={14} className="text-amber-400" />
+          <span className="text-sm font-bold text-white">Raised Hands ({raises.length})</span>
+        </div>
+      </div>
+      <div className="max-h-48 overflow-y-auto divide-y divide-white/5">
+        {raises.map(r => (
+          <div key={r.id} className="flex items-center gap-3 px-4 py-2.5">
+            <img src={r.userAvatar} alt={r.userName} className="w-8 h-8 rounded-full object-cover" referrerPolicy="no-referrer" />
+            <span className="flex-1 text-sm text-white/80 font-medium">{r.userName}</span>
+            {canAct && (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => onAccept(r.userId)}
+                  className="px-3 py-1 bg-emerald-500 rounded-xl text-xs text-white font-bold hover:bg-emerald-600"
+                >Accept</button>
+                <button
+                  onClick={() => onReject(r.userId)}
+                  className="px-3 py-1 bg-white/10 rounded-xl text-xs text-white/60 hover:bg-white/20"
+                >Reject</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ─── MAIN SCREEN ──────────────────────────────────────────────────────────────
 interface RoomDetailScreenProps {
   room: Room;
   user: User;
@@ -18,1115 +253,630 @@ interface RoomDetailScreenProps {
   onSendFriendRequest: (toId: string, toName: string, toAvatar: string) => void;
 }
 
-// ─── DB mapper ──────────────────────────────────────────────────────────────
-const dbToMessage = (row: any): RoomMessage => ({
-  id: row.id,
-  roomId: row.room_id,
-  senderId: row.sender_id,
-  senderName: row.sender_name,
-  senderAvatar: row.sender_avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${row.sender_id}`,
-  text: row.text,
-  timestamp: row.timestamp,
-  mentions: row.mentions || [],
-});
-
-// ─── Typing dots ─────────────────────────────────────────────────────────────
-const TypingDots: React.FC = () => (
-  <span className="inline-flex items-center gap-0.5">
-    {[0, 1, 2].map(i => (
-      <span
-        key={i}
-        className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce"
-        style={{ animationDelay: `${i * 0.15}s` }}
-      />
-    ))}
-  </span>
-);
-
-// ─── Individual Seat Card ─────────────────────────────────────────────────────
-interface SeatCardProps {
-  seat: Seat;
-  myId: string;
-  ownerId: string;
-  isAdmin: boolean;
-  isOwner: boolean;
-  onSit: (seatId: number) => void;
-  onToggleMute: (seatId: number) => void;
-  onToggleCamera: (seatId: number) => void;
-  onToggleLock: (seatId: number) => void;
-  onRemove: (seatId: number) => void;
-  onBan: (userId: string) => void;
-  onMakeAdmin: (userId: string) => void;
-  onOfferSeat: (seatId: number) => void;
-  onSendFriendRequest: (userId: string, name: string, avatar: string) => void;
-  admins: string[];
-}
-
-const SeatCard: React.FC<SeatCardProps> = ({
-  seat, myId, ownerId, isAdmin, isOwner,
-  onSit, onToggleMute, onToggleCamera, onToggleLock,
-  onRemove, onBan, onMakeAdmin, onOfferSeat, onSendFriendRequest, admins
-}) => {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const isMe = seat.userId === myId;
-  const isOccupied = !!seat.userId;
-  const isTargetOwner = seat.userId === ownerId;
-  const canControlMute = isMe || (isAdmin && !isTargetOwner);
-  const isOfferedToMe = seat.offeredToId === myId;
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // Close menu on outside click
-  useEffect(() => {
-    if (!menuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [menuOpen]);
-
-  const handleClick = () => {
-    if (!isOccupied) {
-      // Owner and admin can always sit, even in locked seats
-      if (seat.isLocked && !isOwner && !isAdmin) return;
-      if (!seat.offeredToId || seat.offeredToId === myId || isAdmin || isOwner) {
-        onSit(seat.id);
-      }
-    }
-  };
-
-  return (
-    <div className="flex flex-col items-center gap-1.5 group relative">
-      {/* Seat container */}
-      <div className="relative">
-        {/* Offered pulse ring */}
-        {isOfferedToMe && (
-          <div className="absolute -inset-1 rounded-[22px] border-2 border-emerald-400 animate-pulse z-10 pointer-events-none" />
-        )}
-
-        <div
-          onClick={handleClick}
-          className={`
-            w-[56px] h-[56px] rounded-[18px] overflow-hidden flex items-center justify-center transition-all duration-300 relative
-            ${isMe ? 'ring-2 ring-emerald-400 ring-offset-2 ring-offset-gray-900' : ''}
-            ${isOccupied
-              ? 'bg-gray-800 shadow-lg'
-              : seat.isLocked && !isOwner && !isAdmin
-                ? 'bg-gray-800/60 border-2 border-dashed border-gray-700 cursor-not-allowed'
-                : isOfferedToMe
-                  ? 'bg-emerald-900/50 border-2 border-dashed border-emerald-500 cursor-pointer hover:bg-emerald-800/50'
-                  : (isOwner || isAdmin) && seat.isLocked
-                    ? 'bg-amber-900/30 border-2 border-dashed border-amber-500/60 cursor-pointer hover:bg-amber-900/50'
-                    : 'bg-gray-800/40 border-2 border-dashed border-white/10 cursor-pointer hover:border-emerald-500/60 hover:bg-gray-800/70'}
-          `}
-        >
-          {isOccupied ? (
-            <div className="relative w-full h-full">
-              <img
-                src={seat.userAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${seat.userId}`}
-                className={`w-full h-full object-cover ${seat.isVideoOn ? 'opacity-50' : ''}`}
-                alt={seat.userName || ''}
-                referrerPolicy="no-referrer"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).src = `https://api.dicebear.com/7.x/avataaars/svg?seed=${seat.userId}`;
-                }}
-              />
-              {seat.isVideoOn && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                  <Video size={20} className="text-emerald-400 drop-shadow" />
-                </div>
-              )}
-              {/* Speaking animation */}
-              {!seat.isMuted && (
-                <div className="absolute inset-0 rounded-[18px] ring-2 ring-emerald-500/60 animate-pulse pointer-events-none" />
-              )}
-            </div>
-          ) : seat.isLocked && !isOwner && !isAdmin ? (
-            <Lock size={18} className="text-gray-600" />
-          ) : seat.id === 0 && !isOccupied ? (
-            // Seat 1 is reserved for room owner
-            <div className="text-center px-0.5">
-              <Crown size={14} className="text-amber-400 mx-auto mb-0.5" />
-              <span className="text-[6px] text-amber-400 font-black leading-none">HOST</span>
-            </div>
-          ) : isOfferedToMe ? (
-            <div className="text-center">
-              <UserCheck size={18} className="text-emerald-400 mx-auto mb-0.5" />
-              <span className="text-[7px] text-emerald-400 font-black">FOR YOU</span>
-            </div>
-          ) : (
-            <Plus size={18} className="text-white/20 group-hover:text-emerald-500 transition-colors" />
-          )}
-
-          {/* Muted badge */}
-          {seat.isMuted && isOccupied && (
-            <div className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 rounded-full flex items-center justify-center shadow-lg z-10">
-              <MicOff size={9} className="text-white" />
-            </div>
-          )}
-          {/* Video badge */}
-          {seat.isVideoOn && isOccupied && (
-            <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg z-10">
-              <Video size={9} className="text-white" />
-            </div>
-          )}
-          {/* Owner crown */}
-          {seat.userId === ownerId && (
-            <div className="absolute -top-1 -left-1 w-5 h-5 bg-amber-500 rounded-full flex items-center justify-center shadow-lg z-10">
-              <Crown size={9} className="text-white" />
-            </div>
-          )}
-          {/* Admin badge */}
-          {seat.userId && admins.includes(seat.userId) && seat.userId !== ownerId && (
-            <div className="absolute -top-1 -left-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center shadow-lg z-10">
-              <Shield size={9} className="text-white" />
-            </div>
-          )}
-        </div>
-
-        {/* Controls overlay for occupied seats */}
-        {isOccupied && (
-          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1 bg-black/70 rounded-[18px] z-20 backdrop-blur-[2px]">
-            {/* My seat controls */}
-            {isMe && (
-              <>
-                <button
-                  onClick={e => { e.stopPropagation(); onToggleMute(seat.id); }}
-                  className={`p-1.5 rounded-lg transition-all ${seat.isMuted ? 'bg-rose-500 text-white' : 'bg-white/20 hover:bg-white/40 text-white'}`}
-                  title={seat.isMuted ? 'Unmute' : 'Mute'}
-                >
-                  {seat.isMuted ? <Volume2 size={12} /> : <VolumeX size={12} />}
-                </button>
-                <button
-                  onClick={e => { e.stopPropagation(); onToggleCamera(seat.id); }}
-                  className={`p-1.5 rounded-lg transition-all ${seat.isVideoOn ? 'bg-emerald-500 text-white' : 'bg-white/20 hover:bg-white/40 text-white'}`}
-                  title={seat.isVideoOn ? 'Turn Camera Off' : 'Turn Camera On'}
-                >
-                  {seat.isVideoOn ? <VideoOff size={12} /> : <Video size={12} />}
-                </button>
-              </>
-            )}
-            {/* Admin controls on other seats */}
-            {!isMe && isAdmin && (
-              <button
-                onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
-                className="p-1.5 bg-white/20 hover:bg-white/40 text-white rounded-lg transition-all"
-                title="Options"
-              >
-                <Settings size={12} />
-              </button>
-            )}
-            {/* Non-admin: send friend request */}
-            {!isMe && !isAdmin && seat.userId && (
-              <button
-                onClick={e => { e.stopPropagation(); onSendFriendRequest(seat.userId!, seat.userName || '', seat.userAvatar || ''); }}
-                className="p-1.5 bg-white/20 hover:bg-white/40 text-white rounded-lg transition-all"
-                title="Add Friend"
-              >
-                <UserPlus size={12} />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Owner controls on empty/locked seats */}
-        {!isOccupied && isOwner && (
-          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1 bg-black/60 rounded-[18px] z-20">
-            <button
-              onClick={e => { e.stopPropagation(); onToggleLock(seat.id); }}
-              className="p-1.5 bg-white/20 hover:bg-white/40 text-white rounded-lg transition-all"
-              title={seat.isLocked ? 'Unlock' : 'Lock'}
-            >
-              {seat.isLocked ? <Unlock size={12} /> : <Lock size={12} />}
-            </button>
-            {!seat.isLocked && (
-              <button
-                onClick={e => { e.stopPropagation(); onOfferSeat(seat.id); }}
-                className="p-1.5 bg-emerald-500/80 hover:bg-emerald-500 text-white rounded-lg transition-all"
-                title="Offer Seat"
-              >
-                <UserPlus size={12} />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Admin context menu */}
-        {menuOpen && !isMe && isAdmin && seat.userId && (
-          <div ref={menuRef} className="absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 bg-gray-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden min-w-[150px]">
-            {!isTargetOwner && (
-              <button
-                onClick={() => { onToggleMute(seat.id); setMenuOpen(false); }}
-                className="w-full px-4 py-2.5 text-left text-xs font-bold text-white hover:bg-white/10 flex items-center gap-2 transition-colors"
-              >
-                {seat.isMuted ? <Volume2 size={14} /> : <VolumeX size={14} />}
-                {seat.isMuted ? 'Unmute' : 'Mute'}
-              </button>
-            )}
-            <button
-              onClick={() => { onSendFriendRequest(seat.userId!, seat.userName || '', seat.userAvatar || ''); setMenuOpen(false); }}
-              className="w-full px-4 py-2.5 text-left text-xs font-bold text-white hover:bg-white/10 flex items-center gap-2 transition-colors"
-            >
-              <UserPlus size={14} />
-              Add Friend
-            </button>
-            {isOwner && (
-              <button
-                onClick={() => { onMakeAdmin(seat.userId!); setMenuOpen(false); }}
-                className="w-full px-4 py-2.5 text-left text-xs font-bold text-blue-400 hover:bg-white/10 flex items-center gap-2 transition-colors"
-              >
-                <Shield size={14} />
-                {admins.includes(seat.userId!) ? 'Remove Admin' : 'Make Admin'}
-              </button>
-            )}
-            {!isTargetOwner && (
-              <button
-                onClick={() => { onRemove(seat.id); setMenuOpen(false); }}
-                className="w-full px-4 py-2.5 text-left text-xs font-bold text-rose-400 hover:bg-white/10 flex items-center gap-2 transition-colors"
-              >
-                <UserMinus size={14} />
-                Remove Seat
-              </button>
-            )}
-            {isOwner && !isTargetOwner && (
-              <button
-                onClick={() => { onBan(seat.userId!); setMenuOpen(false); }}
-                className="w-full px-4 py-2.5 text-left text-xs font-bold text-rose-600 hover:bg-rose-500/10 flex items-center gap-2 transition-colors border-t border-white/5"
-              >
-                <Ban size={14} />
-                Ban from Room
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Name label */}
-      <p className={`text-[9px] font-black uppercase tracking-wider truncate max-w-[56px] text-center transition-colors ${isOccupied ? (isMe ? 'text-emerald-400' : 'text-white/80') : seat.id === 0 ? 'text-amber-400/60' : 'text-white/20'}`}>
-        {isOccupied ? (isMe ? 'You' : seat.userName) : (seat.id === 0 ? '👑 Host' : seat.isLocked ? '🔒' : `Seat ${seat.id + 1}`)}
-      </p>
-    </div>
-  );
-};
-
-// ─── Message bubble ───────────────────────────────────────────────────────────
-const MessageBubble: React.FC<{ msg: RoomMessage; isMe: boolean; }> = ({ msg, isMe }) => {
-  const formatTime = (ts: any) => {
-    if (!ts) return '';
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const renderText = (text: string) =>
-    text.split(' ').map((word, i) =>
-      word.startsWith('@')
-        ? <span key={i} className="text-emerald-400 font-bold">{word} </span>
-        : <span key={i}>{word} </span>
-    );
-
-  return (
-    <div className={`flex items-end gap-2 max-w-[85%] ${isMe ? 'flex-row-reverse self-end' : 'self-start'}`}>
-      <img
-        src={msg.senderAvatar}
-        className="w-6 h-6 rounded-lg object-cover flex-shrink-0 mb-1"
-        alt=""
-        referrerPolicy="no-referrer"
-        onError={e => { (e.target as HTMLImageElement).src = `https://api.dicebear.com/7.x/avataaars/svg?seed=${msg.senderId}`; }}
-      />
-      <div className={`px-3 py-2 rounded-2xl text-xs leading-relaxed shadow-sm ${isMe ? 'bg-emerald-600 text-white rounded-br-none' : 'bg-gray-800 text-white/90 rounded-bl-none'}`}>
-        {!isMe && (
-          <p className="text-[8px] font-black text-emerald-400 mb-0.5 uppercase tracking-wider">{msg.senderName}</p>
-        )}
-        <p>{renderText(msg.text)}</p>
-        <p className="text-[9px] opacity-50 mt-0.5 text-right">{formatTime(msg.timestamp)}</p>
-      </div>
-    </div>
-  );
-};
-
-// ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export const RoomDetailScreen: React.FC<RoomDetailScreenProps> = ({
-  room: initialRoom,
-  user,
-  contacts,
-  onClose,
-  onSendFriendRequest,
+  room, user, contacts, onClose, onSendFriendRequest,
 }) => {
-  const [room, setRoom] = useState<Room>(initialRoom);
-  const [messages, setMessages] = useState<RoomMessage[]>([]);
-  const [onlineParticipants, setOnlineParticipants] = useState<RoomParticipant[]>([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [showInvite, setShowInvite] = useState(false);
-  const [showOfferModal, setShowOfferModal] = useState<{ seatId: number } | null>(null);
-  const [showShareModal, setShowShareModal] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [mentionSearch, setMentionSearch] = useState<string | null>(null);
-  const [roomToast, setRoomToast] = useState<string | null>(null);
+  const [seats, setSeats] = useState<Seat[]>(room.seats || []);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [handRaises, setHandRaises] = useState<HandRaise[]>([]);
+  const [speakingUsers, setSpeakingUsers] = useState<Set<string>>(new Set());
+  const [isMuted, setIsMuted] = useState(false);
+  const [isLocked, setIsLocked] = useState(room.isLocked || false);
+  const [showChat, setShowChat] = useState(false);
+  const [showHandRaises, setShowHandRaises] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [hasRaisedHand, setHasRaisedHand] = useState(false);
+  const [listenerCount, setListenerCount] = useState(0);
+  const [emojiReactions, setEmojiReactions] = useState<{ emoji: string; id: string; x: number }[]>([]);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const roomToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
+  const reactTimer = useRef<any>(null);
 
-  const showRoomToast = (msg: string) => {
-    setRoomToast(msg);
-    if (roomToastTimerRef.current) clearTimeout(roomToastTimerRef.current);
-    roomToastTimerRef.current = setTimeout(() => setRoomToast(null), 3000);
-  };
+  const myId = user.id;
+  const myName = user.displayName;
+  const myAvatar = user.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${myId}`;
 
-  const isOwner = room.ownerId === user.uid;
-  const isAdmin = isOwner || (room.admins?.includes(user.uid) || false);
-  const myCurrentSeat = room.seats.find(s => s.userId === user.uid);
-  const isSitting = !!myCurrentSeat;
+  // ── Determine role ─────────────────────────────────────────────────────────
+  const myRole: Role = useMemo(() => {
+    if (room.ownerId === myId) return 'host';
+    if ((room as any).coHosts?.includes(myId)) return 'co-host';
+    if (seats.some(s => s.userId === myId)) return 'speaker';
+    return 'listener';
+  }, [room.ownerId, myId, seats, room]);
 
-  // ─── Room Audio: WebRTC mesh audio between seated users ──────────────────
-  const seatedUserIds = room.seats.filter(s => s.userId).map(s => s.userId as string);
-  const { connectToNewUser, disconnectFromUser } = useRoomAudio({
-    roomId: initialRoom.id,
-    myUserId: user.uid,
-    seatedUserIds,
-    isMuted: myCurrentSeat?.isMuted ?? true,
-    isEnabled: isSitting,
-  });
+  const isSpeaker = myRole === 'host' || myRole === 'co-host' || myRole === 'speaker';
+  const isHost = myRole === 'host';
+  const isCoHost = myRole === 'co-host';
 
-  // ─── Fetch initial messages (filter out WebRTC signals) ──────────────────
-  useEffect(() => {
-    const fetchMessages = async () => {
-      const { data } = await supabase
-        .from('room_messages')
-        .select('*')
-        .eq('room_id', initialRoom.id)
-        .neq('sender_name', '__webrtc__')
-        .order('timestamp', { ascending: true })
-        .limit(100);
-      if (data) setMessages(data.map(dbToMessage));
-    };
-    fetchMessages();
-  }, [initialRoom.id]);
+  // ── Seated users for WebRTC ─────────────────────────────────────────────────
+  const seatedUserIds = useMemo(() =>
+    seats.filter(s => s.userId).map(s => s.userId!),
+    [seats]
+  );
 
-  // ─── Fetch online participants ─────────────────────────────────────────────
-  useEffect(() => {
-    const fetchParticipants = async () => {
-      const { data } = await supabase
-        .from('room_participants')
-        .select('*')
-        .eq('room_id', initialRoom.id);
-
-      if (data) {
-        setOnlineParticipants(data.map(p => ({
-          roomId: p.room_id,
-          userId: p.user_id,
-          displayName: p.display_name,
-          photoUrl: p.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${p.user_id}`,
-          joinedAt: p.joined_at,
-        })));
-      }
-    };
-    fetchParticipants();
-  }, [initialRoom.id]);
-
-  // ─── Auto-sit owner in Seat 1 when entering their own room ──────────────
-  useEffect(() => {
-    if (!isOwner) return;
-    const seat0 = room.seats[0];
-    if (seat0 && !seat0.userId && !isSitting) {
-      // Owner auto-sits in seat 1 (index 0)
-      const newSeats = room.seats.map((s, i) =>
-        i === 0
-          ? { ...s, userId: user.uid, userName: user.displayName, userAvatar: user.photoURL, isMuted: false, isVideoOn: false, isLocked: false }
-          : s
-      );
-      updateSeats(newSeats);
-    }
-  // Only run once on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // ── Active speaker callback ─────────────────────────────────────────────────
+  const handleSpeakingChange = useCallback((userId: string, speaking: boolean) => {
+    setSpeakingUsers(prev => {
+      const next = new Set(prev);
+      speaking ? next.add(userId) : next.delete(userId);
+      return next;
+    });
   }, []);
 
-  // ─── Track my presence in the room ───────────────────────────────────────
+  // ── Room audio hook ─────────────────────────────────────────────────────────
+  const { connectToNewUser, disconnectFromUser } = useRoomAudio({
+    roomId: room.id,
+    myUserId: myId,
+    seatedUserIds,
+    isMuted,
+    isEnabled: isSpeaker,
+    onSpeakingChange: handleSpeakingChange,
+  });
+
+  // ── Sync participants from seats + DB ──────────────────────────────────────
   useEffect(() => {
-    // Check for ban
-    if (room.bannedUserIds?.includes(user.uid)) {
-      showRoomToast('You have been banned from this room.');
-      setTimeout(onClose, 2000);
-      return;
-    }
-
-    // Join room_participants
-    const joinRoom = async () => {
-      await supabase.from('room_participants').upsert({
-        room_id: initialRoom.id,
-        user_id: user.uid,
-        display_name: user.displayName,
-        photo_url: user.photoURL,
-        joined_at: new Date().toISOString(),
-      }, { onConflict: 'room_id,user_id' });
+    const buildParticipants = () => {
+      const coHosts: string[] = (room as any).coHosts || [];
+      const list: Participant[] = seats
+        .filter(s => s.userId)
+        .map(s => {
+          const contact = contacts.find(c => c.id === s.userId);
+          let role: Role = 'speaker';
+          if (s.userId === room.ownerId) role = 'host';
+          else if (coHosts.includes(s.userId!)) role = 'co-host';
+          return {
+            userId: s.userId!,
+            name: s.userId === myId ? myName : (s.displayName || contact?.name || `User ${s.userId!.slice(0, 5)}`),
+            avatar: s.userId === myId ? myAvatar : (s.photoURL || contact?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${s.userId}`),
+            role,
+            isMuted: s.isMuted || false,
+            isSpeaking: speakingUsers.has(s.userId!),
+            joinedAt: s.userId === myId ? new Date().toISOString() : '',
+          };
+        });
+      setParticipants(list);
     };
-    joinRoom();
+    buildParticipants();
+  }, [seats, speakingUsers, myId, myName, myAvatar, room.ownerId, contacts, room]);
 
-    // Leave room on unmount
-    return () => {
-      supabase.from('room_participants').delete()
-        .eq('room_id', initialRoom.id)
-        .eq('user_id', user.uid)
-        .then(() => {});
-    };
-  }, [initialRoom.id, user.uid]);
-
-  // ─── Realtime subscriptions ───────────────────────────────────────────────
+  // ── Subscribe to room real-time changes ─────────────────────────────────────
   useEffect(() => {
-    // 1. Room updates (seats, lock, bans)
-    const roomChannel = supabase
-      .channel(`room-detail-${initialRoom.id}`)
+    const roomCh = supabase
+      .channel(`room-detail-${room.id}`)
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
         table: 'rooms',
-        filter: `id=eq.${initialRoom.id}`,
+        filter: `id=eq.${room.id}`,
       }, (payload) => {
         const r = payload.new as any;
-        setRoom({
-          id: r.id,
-          numericId: r.numeric_id,
-          name: r.name,
-          ownerId: r.owner_id,
-          admins: r.admins || [],
-          seats: r.seats || [],
-          createdAt: r.created_at,
-          participantCount: r.participant_count || 0,
-          description: r.description,
-          avatarUrl: r.avatar_url,
-          isLocked: r.is_locked,
-          bannedUserIds: r.banned_user_ids || [],
-          typingStatus: r.typing_status || {},
-        });
-        // Check ban in real-time
-        if ((r.banned_user_ids || []).includes(user.uid)) {
-          showRoomToast('You have been removed from this room.');
-          setTimeout(onClose, 2000);
-        }
+        if (r.seats) setSeats(r.seats);
+        if (typeof r.is_locked === 'boolean') setIsLocked(r.is_locked);
+        if (typeof r.listener_count === 'number') setListenerCount(r.listener_count);
+        if (r.ended_at) { addSystemMsg('Room has ended.'); setTimeout(onClose, 2000); }
       })
-      // 2. Room messages — filter out WebRTC signaling messages
+      .subscribe();
+
+    return () => { supabase.removeChannel(roomCh); };
+  }, [room.id, onClose]);
+
+  // ── Subscribe to chat messages (ephemeral — only new messages) ────────────
+  useEffect(() => {
+    // Add join system message
+    addSystemMsg(`${myName} joined the room`);
+
+    const chatCh = supabase
+      .channel(`room-chat-${room.id}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'room_messages',
-        filter: `room_id=eq.${initialRoom.id}`,
+        filter: `room_id=eq.${room.id}`,
       }, (payload) => {
         const row = payload.new as any;
-        // Skip WebRTC signaling messages
-        if (row.sender_name === '__webrtc__') return;
-        setMessages(prev => [...prev, dbToMessage(row)]);
-      })
-      // 3. Room participants (online users)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'room_participants',
-        filter: `room_id=eq.${initialRoom.id}`,
-      }, (payload) => {
-        const p = payload.new as any;
-        setOnlineParticipants(prev => {
-          if (prev.some(x => x.userId === p.user_id)) return prev;
-          return [...prev, {
-            roomId: p.room_id,
-            userId: p.user_id,
-            displayName: p.display_name,
-            photoUrl: p.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${p.user_id}`,
-            joinedAt: p.joined_at,
-          }];
-        });
-      })
-      .on('postgres_changes', {
-        event: 'DELETE',
-        schema: 'public',
-        table: 'room_participants',
-        filter: `room_id=eq.${initialRoom.id}`,
-      }, (payload) => {
-        const p = payload.old as any;
-        setOnlineParticipants(prev => prev.filter(x => x.userId !== p.user_id));
+        if (row.mentions?.includes('__webrtc__')) return; // skip WebRTC signals
+        const coHosts: string[] = (room as any).coHosts || [];
+        const msg: ChatMsg = {
+          id: row.id,
+          senderId: row.sender_id,
+          senderName: row.sender_name,
+          senderAvatar: row.sender_avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${row.sender_id}`,
+          text: row.text,
+          type: row.mentions?.includes('__system__') ? 'system' : 'user',
+          timestamp: row.timestamp,
+          isHost: row.sender_id === room.ownerId,
+          isCoHost: coHosts.includes(row.sender_id),
+        };
+        setChatMessages(prev => [...prev.slice(-99), msg]); // keep last 100
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(roomChannel); };
-  }, [initialRoom.id, user.uid]);
+    return () => { supabase.removeChannel(chatCh); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.id]);
 
-  // ─── Typing status ────────────────────────────────────────────────────────
+  // ── Subscribe to hand raises ─────────────────────────────────────────────
   useEffect(() => {
-    if (room.typingStatus) {
-      setTypingUsers(
-        Object.entries(room.typingStatus)
-          .filter(([uid, isTyping]) => isTyping && uid !== user.uid)
-          .map(([uid]) => {
-            const p = onlineParticipants.find(x => x.userId === uid);
-            return p?.displayName || 'Someone';
-          })
-      );
-    }
-  }, [room.typingStatus, user.uid, onlineParticipants]);
+    const fetchRaises = async () => {
+      const { data } = await supabase
+        .from('hand_raises')
+        .select('*')
+        .eq('room_id', room.id)
+        .eq('status', 'pending')
+        .order('raised_at', { ascending: true });
+      setHandRaises((data || []).map(r => ({
+        id: r.id, userId: r.user_id, userName: r.user_name,
+        userAvatar: r.user_avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${r.user_id}`,
+        raisedAt: r.raised_at,
+      })));
+    };
+    fetchRaises();
 
-  // ─── Auto-scroll ──────────────────────────────────────────────────────────
+    const ch = supabase
+      .channel(`hand-raises-${room.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'hand_raises', filter: `room_id=eq.${room.id}` },
+        () => fetchRaises())
+      .subscribe();
+
+    return () => { supabase.removeChannel(ch); };
+  }, [room.id]);
+
+  // ── Increment listener count on join ────────────────────────────────────────
+  useEffect(() => {
+    if (isSpeaker) return;
+    supabase.from('rooms').update({ listener_count: (room as any).listenerCount + 1 }).eq('id', room.id).then(() => {});
+    return () => {
+      supabase.from('rooms').update({ listener_count: Math.max(0, (room as any).listenerCount - 1) }).eq('id', room.id).then(() => {});
+    };
+  }, [isSpeaker, room.id, room]);
+
+  // ── Auto scroll chat ──────────────────────────────────────────────────────
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [chatMessages]);
 
-  // ─── Update typing status ──────────────────────────────────────────────────
-  const updateTyping = useCallback(async (isTyping: boolean) => {
-    await supabase.from('rooms').update({
-      typing_status: { ...room.typingStatus, [user.uid]: isTyping },
-    }).eq('id', room.id);
-  }, [room.id, room.typingStatus, user.uid]);
-
-  const handleInputChange = (value: string) => {
-    setNewMessage(value);
-    // Mention search
-    const lastAt = value.lastIndexOf('@');
-    if (lastAt !== -1 && (lastAt === 0 || value[lastAt - 1] === ' ')) {
-      setMentionSearch(value.slice(lastAt + 1));
-    } else {
-      setMentionSearch(null);
-    }
-    // Typing indicator
-    updateTyping(true);
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => updateTyping(false), 3000);
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const addSystemMsg = (text: string) => {
+    const msg: ChatMsg = {
+      id: `sys-${Date.now()}`,
+      senderId: '__system__',
+      senderName: 'System',
+      senderAvatar: '',
+      text,
+      type: 'system',
+      timestamp: new Date().toISOString(),
+    };
+    setChatMessages(prev => [...prev, msg]);
   };
 
-  // ─── Send message ──────────────────────────────────────────────────────────
-  const handleSendMessage = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    const text = newMessage.trim();
+  const updateSeatsInDb = async (newSeats: Seat[]) => {
+    await supabase.from('rooms').update({ seats: newSeats }).eq('id', room.id);
+  };
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const handleSitDown = async (seatNum: number) => {
+    if (myRole !== 'listener') return; // already a speaker
+    const newSeats = seats.map(s =>
+      s.id === seatNum && !s.userId
+        ? { ...s, userId: myId, displayName: myName, photoURL: myAvatar, isMuted: false }
+        : s
+    );
+    setSeats(newSeats);
+    await updateSeatsInDb(newSeats);
+    addSystemMsg(`${myName} became a speaker`);
+  };
+
+  const handleLeaveSeat = async () => {
+    const newSeats = seats.map(s =>
+      s.userId === myId ? { ...s, userId: null, displayName: null, photoURL: null, isMuted: false } : s
+    );
+    setSeats(newSeats);
+    await updateSeatsInDb(newSeats);
+    disconnectFromUser(myId);
+    addSystemMsg(`${myName} stepped down from speaker`);
+  };
+
+  const handleRemoveSpeaker = async (userId: string) => {
+    const target = seats.find(s => s.userId === userId);
+    if (target) {
+      const newSeats = seats.map(s =>
+        s.userId === userId ? { ...s, userId: null, displayName: null, photoURL: null, isMuted: false } : s
+      );
+      setSeats(newSeats);
+      await updateSeatsInDb(newSeats);
+      disconnectFromUser(userId);
+      addSystemMsg(`A speaker was removed`);
+    }
+  };
+
+  const handleMuteSpeaker = async (userId: string) => {
+    const newSeats = seats.map(s =>
+      s.userId === userId ? { ...s, isMuted: !s.isMuted } : s
+    );
+    setSeats(newSeats);
+    await updateSeatsInDb(newSeats);
+  };
+
+  const handleMakeCoHost = async (userId: string) => {
+    const coHosts = [...((room as any).coHosts || [])];
+    if (!coHosts.includes(userId)) coHosts.push(userId);
+    await supabase.from('rooms').update({ co_hosts: coHosts }).eq('id', room.id);
+    addSystemMsg(`A new co-host was assigned`);
+  };
+
+  const handleToggleLock = async () => {
+    const next = !isLocked;
+    setIsLocked(next);
+    await supabase.from('rooms').update({ is_locked: next }).eq('id', room.id);
+    addSystemMsg(`Room ${next ? 'locked' : 'unlocked'}`);
+  };
+
+  const handleEndRoom = async () => {
+    await supabase.from('rooms').update({ ended_at: new Date().toISOString() }).eq('id', room.id);
+    onClose();
+  };
+
+  const handleRaiseHand = async () => {
+    if (hasRaisedHand) {
+      await supabase.from('hand_raises').delete().eq('room_id', room.id).eq('user_id', myId);
+      setHasRaisedHand(false);
+    } else {
+      await supabase.from('hand_raises').upsert({
+        room_id: room.id,
+        user_id: myId,
+        user_name: myName,
+        user_avatar: myAvatar,
+        status: 'pending',
+      }, { onConflict: 'room_id,user_id' });
+      setHasRaisedHand(true);
+    }
+  };
+
+  const handleAcceptHand = async (userId: string) => {
+    // Find free seat
+    const freeSeat = seats.find(s => !s.userId);
+    if (!freeSeat) return;
+    const target = contacts.find(c => c.id === userId);
+    const raise = handRaises.find(r => r.userId === userId);
+    const newSeats = seats.map(s =>
+      s.id === freeSeat.id
+        ? { ...s, userId, displayName: raise?.userName || target?.name || 'User', photoURL: raise?.userAvatar || target?.avatarUrl || '', isMuted: false }
+        : s
+    );
+    setSeats(newSeats);
+    await updateSeatsInDb(newSeats);
+    await supabase.from('hand_raises').update({ status: 'accepted' }).eq('room_id', room.id).eq('user_id', userId);
+    connectToNewUser(userId);
+    addSystemMsg(`${raise?.userName || 'Someone'} became a speaker`);
+  };
+
+  const handleRejectHand = async (userId: string) => {
+    await supabase.from('hand_raises').update({ status: 'rejected' }).eq('room_id', room.id).eq('user_id', userId);
+  };
+
+  const handleSendChat = async () => {
+    const text = chatInput.trim();
     if (!text) return;
-
-    const mentions = text.match(/@(\w+)/g)?.map(m => m.slice(1)) || [];
-
-    const { error } = await supabase.from('room_messages').insert({
+    setChatInput('');
+    const coHosts: string[] = (room as any).coHosts || [];
+    await supabase.from('room_messages').insert({
       room_id: room.id,
-      sender_id: user.uid,
-      sender_name: user.displayName,
-      sender_avatar: user.photoURL,
+      sender_id: myId,
+      sender_name: myName,
+      sender_avatar: myAvatar,
       text,
       timestamp: new Date().toISOString(),
-      mentions,
+      mentions: [],
     });
-
-    if (error) { handleSupabaseError(error, 'send-room-message'); return; }
-    setNewMessage('');
-    setMentionSearch(null);
-    updateTyping(false);
   };
 
-  // ─── Seat operations ───────────────────────────────────────────────────────
-  const updateSeats = async (newSeats: Seat[]) => {
-    const { error } = await supabase.from('rooms').update({
-      seats: newSeats,
-      participant_count: newSeats.filter(s => s.userId).length,
-    }).eq('id', room.id);
-    if (error) handleSupabaseError(error, 'update-seats');
-  };
-
-  const handleSit = (seatId: number) => {
-    if (isSitting) return; // Already seated
-    const newSeats = room.seats.map(s => {
-      if (s.id !== seatId) return s;
-      // Owner and admins can bypass locks and offer restrictions
-      const canBypassRestrictions = isOwner || isAdmin;
-      const canSit =
-        !s.userId &&
-        (canBypassRestrictions || !s.isLocked) &&
-        (!s.offeredToId || s.offeredToId === user.uid || canBypassRestrictions);
-      if (!canSit) return s;
-      return {
-        ...s,
-        userId: user.uid,
-        userName: user.displayName,
-        userAvatar: user.photoURL,
-        isMuted: false,
-        offeredToId: null,
-        isVideoOn: false,
-      };
+  const handleEmojiReact = async (emoji: string) => {
+    setShowEmojiPicker(false);
+    // Show floating emoji animation
+    const id = `${Date.now()}`;
+    const x = 20 + Math.random() * 60;
+    setEmojiReactions(prev => [...prev, { emoji, id, x }]);
+    reactTimer.current = setTimeout(() => {
+      setEmojiReactions(prev => prev.filter(r => r.id !== id));
+    }, 2500);
+    // Save to DB
+    await supabase.from('room_reactions').insert({
+      room_id: room.id,
+      user_id: myId,
+      emoji,
     });
-    updateSeats(newSeats);
   };
 
-  const handleLeaveSeat = () => {
-    const newSeats = room.seats.map(s =>
-      s.userId === user.uid
-        ? { ...s, userId: null, userName: null, userAvatar: null, isMuted: false, isVideoOn: false }
-        : s
-    );
-    updateSeats(newSeats);
-  };
-
-  const handleToggleMute = (seatId: number) => {
-    const newSeats = room.seats.map(s => {
-      if (s.id !== seatId || !s.userId) return s;
-      const canMute = s.userId === user.uid || (isAdmin && s.userId !== room.ownerId);
-      if (!canMute) return s;
-      return { ...s, isMuted: !s.isMuted };
-    });
-    updateSeats(newSeats);
-  };
-
-  const handleToggleCamera = (seatId: number) => {
-    const newSeats = room.seats.map(s =>
-      s.id === seatId && s.userId === user.uid
-        ? { ...s, isVideoOn: !s.isVideoOn }
-        : s
-    );
-    updateSeats(newSeats);
-  };
-
-  const handleToggleLock = (seatId: number) => {
-    if (!isOwner) return;
-    const newSeats = room.seats.map(s => {
-      if (s.id !== seatId) return s;
-      const locking = !s.isLocked;
-      return {
-        ...s,
-        isLocked: locking,
-        ...(locking ? { userId: null, userName: null, userAvatar: null, offeredToId: null, isVideoOn: false } : {}),
-      };
-    });
-    updateSeats(newSeats);
-  };
-
-  const handleRemoveFromSeat = (seatId: number) => {
-    if (!isAdmin) return;
-    const newSeats = room.seats.map(s =>
-      s.id === seatId
-        ? { ...s, userId: null, userName: null, userAvatar: null, isMuted: false, isVideoOn: false }
-        : s
-    );
-    updateSeats(newSeats);
-  };
-
-  const handleBanUser = async (userId: string) => {
-    if (!isOwner) return;
-    const newSeats = room.seats.map(s =>
-      s.userId === userId ? { ...s, userId: null, userName: null, userAvatar: null } : s
-    );
-    const { error } = await supabase.from('rooms').update({
-      seats: newSeats,
-      banned_user_ids: [...(room.bannedUserIds || []), userId],
-    }).eq('id', room.id);
-    if (error) handleSupabaseError(error, 'ban-user');
-  };
-
-  const handleMakeAdmin = async (userId: string) => {
-    if (!isOwner) return;
-    const isCurrentAdmin = room.admins.includes(userId);
-    const newAdmins = isCurrentAdmin
-      ? room.admins.filter(id => id !== userId)
-      : [...room.admins, userId];
-
-    await supabase.from('rooms').update({ admins: newAdmins }).eq('id', room.id);
-  };
-
-  const handleOfferSeat = async (seatId: number, targetUserId: string) => {
-    if (!isOwner) return;
-    const newSeats = room.seats.map(s =>
-      s.id === seatId ? { ...s, offeredToId: targetUserId, isLocked: false } : s
-    );
-    updateSeats(newSeats);
-    setShowOfferModal(null);
-  };
-
-  const toggleRoomLock = async () => {
-    if (!isOwner) return;
-    await supabase.from('rooms').update({ is_locked: !room.isLocked }).eq('id', room.id);
-  };
-
-  const copyRoomId = async () => {
-    const shareText = `Join my ViaaChat room! Room ID: ${room.numericId}`;
-    try {
-      await navigator.clipboard.writeText(shareText);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
+  const handleLeave = async () => {
+    if (isSpeaker && !isHost) await handleLeaveSeat();
+    if (isHost) {
+      // Transfer host to first co-host or first speaker
+      const coHosts: string[] = (room as any).coHosts || [];
+      const nextHost = coHosts[0] || seats.find(s => s.userId && s.userId !== myId)?.userId;
+      if (nextHost) {
+        await supabase.from('rooms').update({ owner_id: nextHost }).eq('id', room.id);
+      } else {
+        // No one left — end the room
+        await handleEndRoom();
+        return;
+      }
     }
+    addSystemMsg(`${myName} left the room`);
+    onClose();
   };
 
-  const handleShareRoom = async () => {
-    const shareData = {
-      title: `ViaaChat Room: ${room.name}`,
-      text: `Join my live room on ViaaChat! Room ID: ${room.numericId}`,
-      url: window.location.origin,
-    };
-    if (navigator.share) {
-      try { await navigator.share(shareData); } catch {}
-    } else {
-      setShowShareModal(true);
-    }
-  };
+  // ── Empty seats to fill grid to 10 ────────────────────────────────────────
+  const displaySeats = useMemo(() => {
+    const filled = [...seats];
+    while (filled.length < 10) filled.push({ id: filled.length + 1, userId: null, isLocked: false, isMuted: false });
+    return filled.slice(0, 10);
+  }, [seats]);
 
-  // Mention autocomplete filter
-  const mentionCandidates = mentionSearch !== null
-    ? onlineParticipants
-        .filter(p => p.userId !== user.uid && p.displayName.toLowerCase().includes(mentionSearch.toLowerCase()))
-        .slice(0, 5)
-    : [];
-
-  const insertMention = (name: string) => {
-    const lastAt = newMessage.lastIndexOf('@');
-    setNewMessage(newMessage.slice(0, lastAt) + `@${name} `);
-    setMentionSearch(null);
-    inputRef.current?.focus();
-  };
-
-  // Online users NOT seated (for offer modal)
-  const unseatedOnlineUsers = onlineParticipants.filter(p => {
-    if (p.userId === user.uid) return false;
-    return !room.seats.some(s => s.userId === p.userId);
-  });
+  const speakerCount = seats.filter(s => s.userId).length;
+  const totalListeners = listenerCount + (myRole === 'listener' ? 1 : 0);
 
   return (
-    <div className="fixed inset-0 z-[150] bg-gray-950 flex flex-col overflow-hidden">
-      {/* Room Toast */}
-      {roomToast && (
-        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[9999] bg-slate-800/95 text-white px-5 py-3 rounded-2xl shadow-2xl text-sm font-bold animate-pulse max-w-[90vw] text-center pointer-events-none">
-          {roomToast}
-        </div>
-      )}
-      {/* ─── HEADER ─────────────────────────────────────────────────────────── */}
-      <header className="relative flex-shrink-0 px-4 pt-10 pb-3 flex items-center justify-between bg-gradient-to-b from-gray-950 to-gray-950/0 z-10">
-        <div className="flex items-center gap-3">
-          <button onClick={onClose} className="p-2 text-white/50 hover:text-white transition-colors active:scale-90">
-            <X size={22} />
+    <div className="fixed inset-0 bg-gray-950 z-50 flex flex-col overflow-hidden">
+
+      {/* ── Floating emoji reactions ─────────────────────────────────────── */}
+      <div className="absolute inset-0 pointer-events-none z-50 overflow-hidden">
+        {emojiReactions.map(r => (
+          <div
+            key={r.id}
+            className="absolute bottom-24 text-3xl animate-[floatUp_2.5s_ease-out_forwards]"
+            style={{ left: `${r.x}%` }}
+          >
+            {r.emoji}
+          </div>
+        ))}
+      </div>
+
+      {/* ── Header ───────────────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 bg-gray-900/90 backdrop-blur-xl border-b border-white/10 px-4 pt-safe-top pb-0">
+        <div className="flex items-center gap-3 py-3">
+          <button onClick={handleLeave} className="p-2 -ml-2 rounded-xl text-white/50 hover:text-white hover:bg-white/10 transition-all">
+            <ChevronDown size={20} />
           </button>
-          <div className="min-w-0">
-            <h2 className="text-lg font-black text-white truncate max-w-[160px]">{room.name}</h2>
-            <div className="flex items-center gap-2">
-              <span className="text-[9px] font-black text-white/30 uppercase tracking-widest">Room #{room.numericId}</span>
-              <div className="w-px h-3 bg-white/10" />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-black text-white truncate">{room.title}</h2>
+            <div className="flex items-center gap-2 mt-0.5">
               <div className="flex items-center gap-1">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[9px] font-bold text-emerald-400">{onlineParticipants.length} online</span>
+                <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                <span className="text-[10px] text-red-400 font-bold uppercase tracking-wider">Live</span>
               </div>
+              <span className="text-[10px] text-white/30">·</span>
+              <div className="flex items-center gap-1 text-[10px] text-white/40">
+                <Users size={10} />
+                <span>{speakerCount} speakers · {totalListeners} listeners</span>
+              </div>
+              {isLocked && <Lock size={10} className="text-amber-400" />}
             </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-1.5">
-          {isOwner && (
-            <button
-              onClick={toggleRoomLock}
-              className={`p-2.5 rounded-xl transition-all active:scale-90 ${room.isLocked ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/30' : 'bg-white/10 text-white/70 hover:bg-white/15'}`}
-              title={room.isLocked ? 'Unlock Room' : 'Lock Room'}
-            >
-              {room.isLocked ? <Lock size={18} /> : <Unlock size={18} />}
-            </button>
-          )}
-          <button
-            onClick={() => setShowInvite(true)}
-            className="p-2.5 bg-white/10 text-white/70 rounded-xl hover:bg-white/15 transition-all"
-          >
-            <UserPlus size={18} />
-          </button>
-          <button
-            onClick={handleShareRoom}
-            className="p-2.5 bg-white/10 text-white/70 rounded-xl hover:bg-white/15 transition-all"
-          >
-            <Share2 size={18} />
-          </button>
-        </div>
-      </header>
-
-      {/* ─── SEATS SECTION (upper ~44% of screen) ───────────────────────────── */}
-      <div className="flex-shrink-0 h-[44%] flex flex-col items-center justify-start pt-2 pb-3 px-4 relative overflow-hidden">
-        {/* Background glow */}
-        <div className="absolute inset-0 bg-gradient-to-b from-emerald-950/20 via-transparent to-gray-950/80 pointer-events-none" />
-
-        {/* Seats grid 5x2 */}
-        <div className="relative z-10 grid grid-cols-5 gap-x-3 gap-y-4 w-full max-w-xs">
-          {room.seats.map(seat => (
-            <SeatCard
-              key={seat.id}
-              seat={seat}
-              myId={user.uid}
-              ownerId={room.ownerId}
-              isAdmin={isAdmin}
-              isOwner={isOwner}
-              admins={room.admins || []}
-              onSit={handleSit}
-              onToggleMute={handleToggleMute}
-              onToggleCamera={handleToggleCamera}
-              onToggleLock={handleToggleLock}
-              onRemove={handleRemoveFromSeat}
-              onBan={handleBanUser}
-              onMakeAdmin={handleMakeAdmin}
-              onOfferSeat={(seatId) => setShowOfferModal({ seatId })}
-              onSendFriendRequest={onSendFriendRequest}
-            />
-          ))}
-        </div>
-
-        {/* Leave seat / My controls */}
-        {isSitting && (
-          <div className="relative z-10 flex items-center gap-2 mt-3">
-            <button
-              onClick={() => handleToggleMute(myCurrentSeat!.id)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-90 ${myCurrentSeat?.isMuted ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'}`}
-            >
-              {myCurrentSeat?.isMuted ? <MicOff size={12} /> : <Mic size={12} />}
-              {myCurrentSeat?.isMuted ? 'Unmute' : 'Muted? Unmute'}
-            </button>
-            <button
-              onClick={handleLeaveSeat}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all border border-rose-500/20 active:scale-90"
-            >
-              <X size={12} />
-              Leave
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* ─── CHAT SECTION ───────────────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col bg-gray-900/80 border-t border-white/5 overflow-hidden">
-        {/* Chat header bar */}
-        <div className="flex-shrink-0 px-4 py-2 flex items-center justify-between border-b border-white/5 bg-gray-900/50">
-          <div className="flex items-center gap-2">
-            <MessageSquare size={12} className="text-emerald-500" />
-            <span className="text-[9px] font-black text-white/50 uppercase tracking-widest">Room Chat</span>
-            {/* E2EE badge */}
-            <div className="flex items-center gap-1 px-2 py-0.5 bg-emerald-500/10 rounded-full border border-emerald-500/20">
-              <Shield size={8} className="text-emerald-500" />
-              <span className="text-[7px] font-black text-emerald-500 uppercase tracking-wider">E2EE</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Radio size={8} className="text-white/20" />
-            <span className="text-[8px] text-white/20 font-bold">{messages.length} msgs</span>
-          </div>
-        </div>
-
-        {/* Messages list */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2 no-scrollbar">
-          {messages.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center opacity-20 select-none">
-              <MessageSquare size={40} className="text-white mb-3" />
-              <p className="text-xs font-black text-white uppercase tracking-widest">Start the conversation</p>
-            </div>
-          ) : (
-            messages.map(msg => (
-              <MessageBubble key={msg.id} msg={msg} isMe={msg.senderId === user.uid} />
-            ))
-          )}
-          {/* Typing indicator */}
-          {typingUsers.length > 0 && (
-            <div className="self-start flex items-center gap-2 px-3 py-2 bg-gray-800 rounded-2xl rounded-bl-none">
-              <TypingDots />
-              <span className="text-[10px] text-white/50 font-medium">
-                {typingUsers.slice(0, 2).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing
-              </span>
-            </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
-
-        {/* Mention autocomplete */}
-        {mentionCandidates.length > 0 && (
-          <div className="mx-4 mb-1 bg-gray-800 rounded-2xl overflow-hidden border border-white/10 shadow-2xl">
-            {mentionCandidates.map(p => (
+          {/* Host controls */}
+          {(isHost || isCoHost) && (
+            <div className="flex items-center gap-1">
               <button
-                key={p.userId}
-                onClick={() => insertMention(p.displayName)}
-                className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-white/10 transition-colors"
+                onClick={handleToggleLock}
+                className="p-2 rounded-xl text-white/50 hover:text-white hover:bg-white/10 transition-all"
+                title={isLocked ? 'Unlock room' : 'Lock room'}
               >
-                <img src={p.photoUrl} className="w-7 h-7 rounded-lg object-cover" alt="" />
-                <span className="text-sm font-bold text-white">{p.displayName}</span>
-                <AtSign size={12} className="text-emerald-500 ml-auto" />
+                {isLocked ? <Unlock size={18} /> : <Lock size={18} />}
               </button>
-            ))}
+              {isHost && (
+                <button
+                  onClick={handleEndRoom}
+                  className="px-3 py-1.5 bg-red-500/20 text-red-400 text-xs font-bold rounded-xl hover:bg-red-500/30 transition-all"
+                >
+                  End
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Speaker Grid ─────────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 px-4 pt-5 pb-2">
+        <div className="grid grid-cols-5 gap-3 justify-items-center">
+          {displaySeats.map(seat => {
+            const participant = participants.find(p => p.userId === seat.userId);
+            return (
+              <div key={seat.id} className="relative">
+                <SeatCard
+                  seat={seat}
+                  participant={participant}
+                  myId={myId}
+                  myRole={myRole}
+                  isSpeaking={speakingUsers.has(seat.userId || '')}
+                  onRemove={handleRemoveSpeaker}
+                  onMute={handleMuteSpeaker}
+                  onMakeCoHost={handleMakeCoHost}
+                  onSitDown={handleSitDown}
+                  onSendFriendRequest={onSendFriendRequest}
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Category tag */}
+        <div className="flex items-center gap-2 mt-4 px-1">
+          <Radio size={12} className="text-emerald-400" />
+          <span className="text-xs text-emerald-400 font-bold">{(room as any).category || 'General'}</span>
+          {room.description && (
+            <p className="text-xs text-white/30 truncate">{room.description}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 flex flex-col min-h-0 relative">
+        {/* ── Chat panel ─────────────────────────────────────────────────── */}
+        {showChat && (
+          <div className="flex-1 flex flex-col min-h-0 bg-gray-900/50 border-t border-white/10">
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2 scroll-smooth">
+              {chatMessages.map(msg => (
+                <ChatMessage key={msg.id} msg={msg} myId={myId} />
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+            <div className="flex-shrink-0 px-3 pb-3 pt-2 border-t border-white/10">
+              <div className="flex items-center gap-2 bg-white/10 rounded-2xl px-3">
+                <input
+                  ref={chatInputRef}
+                  value={chatInput}
+                  onChange={e => setChatInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleSendChat()}
+                  placeholder="Message..."
+                  className="flex-1 bg-transparent py-3 text-sm text-white placeholder-white/30 focus:outline-none"
+                />
+                <button
+                  onClick={handleSendChat}
+                  disabled={!chatInput.trim()}
+                  className="p-1.5 text-emerald-400 disabled:text-white/20 transition-colors"
+                >
+                  <Send size={16} />
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* ─── INPUT BAR ─────────────────────────────────────────────────── */}
-        <form
-          onSubmit={handleSendMessage}
-          className="flex-shrink-0 p-3 bg-gray-950 border-t border-white/5 flex items-center gap-2"
-        >
-          <div className="flex-1 flex items-center bg-gray-800/80 rounded-2xl border border-white/5 focus-within:border-emerald-500/40 transition-all px-1">
-            <button
-              type="button"
-              onClick={() => {
-                setNewMessage(prev => prev + '@');
-                setMentionSearch('');
-                inputRef.current?.focus();
-              }}
-              className="p-2 text-white/30 hover:text-emerald-400 transition-colors"
-            >
-              <AtSign size={16} />
-            </button>
-            <input
-              ref={inputRef}
-              type="text"
-              value={newMessage}
-              onChange={e => handleInputChange(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-              placeholder="Say something... use @ to tag"
-              className="flex-1 bg-transparent text-white text-sm py-2.5 px-1 focus:outline-none placeholder-white/20"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={!newMessage.trim()}
-            className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-emerald-500 text-white rounded-xl hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-30 disabled:shadow-none active:scale-90"
-          >
-            <Send size={18} />
-          </button>
-        </form>
-      </div>
-
-      {/* ─── INVITE MODAL ───────────────────────────────────────────────────── */}
-      {showInvite && (
-        <div className="fixed inset-0 z-[200] flex items-end justify-center p-4">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={() => setShowInvite(false)} />
-          <div className="relative w-full max-w-md bg-gray-900 rounded-t-[2.5rem] border-t border-white/10 shadow-2xl p-6 animate-slide-up max-h-[70vh] flex flex-col">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="text-xl font-black text-white">Invite Friends</h3>
-                <p className="text-xs text-white/30 mt-0.5">Share Room #{room.numericId}</p>
-              </div>
-              <button onClick={() => setShowInvite(false)} className="p-2 text-white/40 hover:text-white transition-colors">
-                <X size={22} />
-              </button>
-            </div>
-
-            {/* Copy room ID */}
-            <button
-              onClick={copyRoomId}
-              className="flex items-center justify-between w-full bg-emerald-500/10 border border-emerald-500/20 rounded-2xl px-5 py-4 mb-4 hover:bg-emerald-500/15 transition-all active:scale-95"
-            >
-              <div className="text-left">
-                <p className="text-xs text-white/50 font-bold uppercase tracking-wider">Room ID</p>
-                <p className="text-2xl font-black text-white mt-0.5">{room.numericId}</p>
-              </div>
-              <div className={`p-3 rounded-xl transition-all ${copied ? 'bg-emerald-500 text-white' : 'bg-white/10 text-white/60'}`}>
-                {copied ? <Check size={20} /> : <Copy size={20} />}
-              </div>
-            </button>
-
-            {/* Contact list to invite */}
-            <div className="overflow-y-auto flex-1 space-y-2 no-scrollbar">
-              <p className="text-[10px] text-white/30 font-black uppercase tracking-widest mb-2">Your Contacts</p>
-              {contacts.length === 0 && (
-                <p className="text-center text-white/20 py-6 text-sm">No contacts yet</p>
-              )}
-              {contacts.map(contact => (
-                <div key={contact.id} className="flex items-center gap-3 px-1">
-                  <img src={contact.avatarUrl} className="w-10 h-10 rounded-xl object-cover" alt="" referrerPolicy="no-referrer" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-white truncate">{contact.name}</p>
-                    <p className="text-[10px] text-white/30">Tap to notify</p>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      // Send a chat message with invite
-                      const { data: chatData } = await supabase
-                        .from('chats')
-                        .select('id')
-                        .contains('participants', [user.uid, contact.id])
-                        .eq('is_group', false)
-                        .single();
-
-                      if (chatData) {
-                        await supabase.from('chat_messages').insert({
-                          chat_id: chatData.id,
-                          sender_id: user.uid,
-                          sender_name: user.displayName,
-                          text: `🎙️ Join my live ViaaChat room "${room.name}"! Room ID: ${room.numericId}`,
-                          timestamp: new Date().toISOString(),
-                          type: 'text',
-                        });
-                        showRoomToast(`✉️ Invite sent to ${contact.name}!`);
-                      } else {
-                        copyRoomId();
-                        showRoomToast(`✅ Invite link copied for ${contact.name}!`);
-                      }
-                    }}
-                    className="px-3 py-1.5 bg-emerald-500/20 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-500/30 transition-all"
-                  >
-                    Invite
-                  </button>
+        {/* ── Listeners section (when chat hidden) ─────────────────────── */}
+        {!showChat && (
+          <div className="flex-1 overflow-y-auto px-4 py-2">
+            <p className="text-xs text-white/30 font-bold uppercase tracking-widest mb-3">Listeners</p>
+            <div className="grid grid-cols-6 gap-2">
+              {/* Placeholder listeners */}
+              {Array.from({ length: Math.min(totalListeners, 18) }).map((_, i) => (
+                <div key={i} className="flex flex-col items-center gap-1">
+                  <div
+                    className="w-10 h-10 rounded-full bg-white/5 border border-white/10"
+                    style={{ background: `hsl(${(i * 37) % 360}, 50%, 25%)` }}
+                  />
+                  <span className="text-[9px] text-white/30">Listener</span>
                 </div>
               ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ─── OFFER SEAT MODAL ───────────────────────────────────────────────── */}
-      {showOfferModal && (
-        <div className="fixed inset-0 z-[250] flex items-end justify-center p-4">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => setShowOfferModal(null)} />
-          <div className="relative w-full max-w-md bg-gray-900 rounded-t-[2.5rem] border-t border-white/10 shadow-2xl p-6 animate-slide-up max-h-[60vh] flex flex-col">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="text-xl font-black text-white">Offer Seat {showOfferModal.seatId + 1}</h3>
-                <p className="text-xs text-white/30 mt-0.5">Select an online user</p>
-              </div>
-              <button onClick={() => setShowOfferModal(null)} className="p-2 text-white/40 hover:text-white transition-colors">
-                <X size={22} />
-              </button>
-            </div>
-
-            <div className="overflow-y-auto flex-1 space-y-2 no-scrollbar">
-              {unseatedOnlineUsers.length === 0 ? (
-                <div className="text-center py-8">
-                  <Users size={32} className="text-white/10 mx-auto mb-3" />
-                  <p className="text-white/30 text-sm">No one available to offer a seat to.</p>
-                  <p className="text-white/20 text-xs mt-1">Users must be in the room to receive offers.</p>
+              {totalListeners > 18 && (
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center">
+                    <span className="text-xs text-white/40 font-bold">+{totalListeners - 18}</span>
+                  </div>
                 </div>
-              ) : (
-                unseatedOnlineUsers.map(p => (
-                  <button
-                    key={p.userId}
-                    onClick={() => handleOfferSeat(showOfferModal.seatId, p.userId)}
-                    className="w-full flex items-center gap-3 px-4 py-3.5 bg-white/5 rounded-2xl hover:bg-emerald-500/10 hover:border-emerald-500/20 border border-transparent transition-all active:scale-98 group"
-                  >
-                    <img src={p.photoUrl} className="w-11 h-11 rounded-xl object-cover" alt="" />
-                    <div className="flex-1 text-left min-w-0">
-                      <p className="text-sm font-bold text-white truncate">{p.displayName}</p>
-                      <p className="text-[10px] text-emerald-400 font-bold">● Online in room</p>
-                    </div>
-                    <UserCheck size={18} className="text-emerald-500 opacity-0 group-hover:opacity-100 transition-all" />
-                  </button>
-                ))
               )}
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* ─── SHARE MODAL ────────────────────────────────────────────────────── */}
-      {showShareModal && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-md" onClick={() => setShowShareModal(false)} />
-          <div className="relative bg-gray-900 rounded-3xl border border-white/10 shadow-2xl p-8 w-full max-w-sm animate-scale-in">
-            <h3 className="text-xl font-black text-white mb-1">Share Room</h3>
-            <p className="text-xs text-white/40 mb-6">Anyone with this ID can join your room</p>
-            <div className="bg-white/5 border border-white/10 rounded-2xl flex items-center justify-between px-5 py-4 mb-4">
-              <div>
-                <p className="text-xs text-white/30 font-bold uppercase tracking-wider">Room ID</p>
-                <p className="text-3xl font-black text-white">{room.numericId}</p>
-              </div>
-              <button
-                onClick={copyRoomId}
-                className={`px-4 py-2.5 rounded-xl font-bold text-sm transition-all active:scale-90 ${copied ? 'bg-emerald-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
-              >
-                {copied ? '✓ Copied' : 'Copy ID'}
-              </button>
-            </div>
-            <button onClick={() => setShowShareModal(false)} className="w-full py-3 bg-white/5 rounded-2xl text-white/50 font-bold hover:bg-white/10 transition-colors">
-              Done
+        {/* ── Hand raise queue ─────────────────────────────────────────── */}
+        {showHandRaises && handRaises.length > 0 && (
+          <HandRaiseQueue
+            raises={handRaises}
+            myRole={myRole}
+            onAccept={handleAcceptHand}
+            onReject={handleRejectHand}
+          />
+        )}
+      </div>
+
+      {/* ── Emoji picker ──────────────────────────────────────────────────── */}
+      {showEmojiPicker && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 flex gap-2 bg-gray-800 border border-white/10 rounded-2xl px-4 py-3 shadow-2xl z-40">
+          {EMOJI_REACTIONS.map(e => (
+            <button key={e} onClick={() => handleEmojiReact(e)} className="text-2xl hover:scale-125 active:scale-110 transition-transform">
+              {e}
             </button>
-          </div>
+          ))}
         </div>
       )}
 
+      {/* ── Control Bar ──────────────────────────────────────────────────── */}
+      <div className="flex-shrink-0 bg-gray-900/95 backdrop-blur-xl border-t border-white/10 px-4 pt-3 pb-safe-bottom">
+        <div className="flex items-center justify-between max-w-sm mx-auto">
+
+          {/* Mic toggle (speakers only) */}
+          {isSpeaker ? (
+            <button
+              onClick={() => setIsMuted(m => !m)}
+              className={`flex flex-col items-center gap-1 p-3 rounded-2xl transition-all ${
+                isMuted ? 'bg-red-500/20 text-red-400' : 'bg-white/10 text-white hover:bg-white/20'
+              }`}
+            >
+              {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+              <span className="text-[9px] font-bold">{isMuted ? 'Muted' : 'Mic'}</span>
+            </button>
+          ) : (
+            /* Raise hand (listeners) */
+            <button
+              onClick={handleRaiseHand}
+              className={`flex flex-col items-center gap-1 p-3 rounded-2xl transition-all ${
+                hasRaisedHand ? 'bg-amber-500/20 text-amber-400' : 'bg-white/10 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              <Hand size={20} />
+              <span className="text-[9px] font-bold">{hasRaisedHand ? 'Lower' : 'Raise'}</span>
+            </button>
+          )}
+
+          {/* Hand raises indicator (host/co-host) */}
+          {(isHost || isCoHost) && handRaises.length > 0 && (
+            <button
+              onClick={() => setShowHandRaises(h => !h)}
+              className="relative flex flex-col items-center gap-1 p-3 rounded-2xl bg-amber-500/20 text-amber-400"
+            >
+              <Hand size={20} />
+              <span className="text-[9px] font-bold">Hands</span>
+              <div className="absolute -top-1 -right-1 w-5 h-5 bg-amber-500 rounded-full flex items-center justify-center">
+                <span className="text-[9px] text-white font-black">{handRaises.length}</span>
+              </div>
+            </button>
+          )}
+
+          {/* Emoji react */}
+          <button
+            onClick={() => setShowEmojiPicker(e => !e)}
+            className="flex flex-col items-center gap-1 p-3 rounded-2xl bg-white/10 text-white/60 hover:bg-white/20 transition-all"
+          >
+            <Smile size={20} />
+            <span className="text-[9px] font-bold">React</span>
+          </button>
+
+          {/* Chat */}
+          <button
+            onClick={() => setShowChat(c => !c)}
+            className={`flex flex-col items-center gap-1 p-3 rounded-2xl transition-all ${
+              showChat ? 'bg-emerald-500/20 text-emerald-400' : 'bg-white/10 text-white/60 hover:bg-white/20'
+            }`}
+          >
+            <MessageSquare size={20} />
+            <span className="text-[9px] font-bold">Chat</span>
+          </button>
+
+          {/* Step down (if speaker but not host) */}
+          {isSpeaker && !isHost && (
+            <button
+              onClick={handleLeaveSeat}
+              className="flex flex-col items-center gap-1 p-3 rounded-2xl bg-white/10 text-white/60 hover:bg-white/20 transition-all"
+            >
+              <Users size={20} />
+              <span className="text-[9px] font-bold">Step Down</span>
+            </button>
+          )}
+
+          {/* Leave */}
+          <button
+            onClick={handleLeave}
+            className="flex flex-col items-center gap-1 p-3 rounded-2xl bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-all"
+          >
+            <LogOut size={20} />
+            <span className="text-[9px] font-bold">Leave</span>
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
