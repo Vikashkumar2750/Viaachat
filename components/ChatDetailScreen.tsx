@@ -150,7 +150,15 @@ const MessageBubble: React.FC<{
     <div className={`flex ${isYou ? 'justify-end' : 'justify-start'} mb-3 group relative`}>
       <div className="relative max-w-[80%]">
         <div
-          className={`rounded-2xl ${isImage ? 'p-0 overflow-hidden' : 'px-4 py-2'} shadow-sm ${isYou ? 'bg-emerald-500 text-white rounded-tr-none' : 'bg-white text-gray-800 rounded-tl-none'}`}
+          className={`rounded-2xl ${
+            isImage ? 'p-0 overflow-hidden' : 'px-4 py-2'
+          } shadow-sm ${
+            isYou
+              // Light mint-green bubble: ticks (grey/blue) are clearly visible on this background
+              ? 'rounded-tr-none' 
+              : 'bg-white text-gray-800 rounded-tl-none'
+          }`}
+          style={isYou ? { backgroundColor: '#e2fce5', color: '#1a1a1a' } : undefined}
           onDoubleClick={() => setShowReactions(true)}
           onContextMenu={e => { e.preventDefault(); setShowMenu(true); }}
         >
@@ -170,17 +178,19 @@ const MessageBubble: React.FC<{
           )}
 
           {message.isPinned && (
-            <span className={`text-[9px] font-black uppercase tracking-widest ${isYou ? 'text-white/50' : 'text-emerald-500'}`}>📌 Pinned</span>
+            <span className={`text-[9px] font-black uppercase tracking-widest ${isYou ? 'text-gray-500' : 'text-emerald-500'}`}>📌 Pinned</span>
           )}
           <div className={`flex items-center justify-end gap-1 mt-1 ${isImage ? 'absolute bottom-2 right-2 bg-black/30 px-1.5 py-0.5 rounded-full' : ''}`}>
-            <p className={`text-[10px] opacity-60 ${isImage ? 'text-white' : ''}`}>
+            <p className={`text-[10px] opacity-60 ${isImage ? 'text-white' : 'text-gray-500'}`}>
               {formatTime(message.timestamp)}
             </p>
-            {/* Sent/Read ticks — only for your own messages */}
+            {/* Sent/Read ticks — only for YOUR messages */}
             {isYou && (
               message.isRead
-                ? <CheckCheck size={12} className="text-blue-400 flex-shrink-0" />
-                : <Check size={12} className="text-white/50 flex-shrink-0" />
+                // Blue ✓✓ = read by other user
+                ? <CheckCheck size={14} className={isImage ? 'text-blue-300' : 'text-blue-500'} />
+                // Grey ✓ = sent/delivered, not yet read
+                : <Check size={14} className={isImage ? 'text-white/60' : 'text-gray-400'} />
             )}
           </div>
         </div>
@@ -292,6 +302,8 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Prevents markAllRead() from firing on the OWN message's chat UPDATE event
+  const justSentRef = useRef(false);
 
   const PAGE_SIZE = 40;
 
@@ -428,8 +440,9 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
           .filter(([uid, isTyping]) => isTyping && uid !== myId)
           .map(([uid]) => uid);
         setTypingUsers(typing);
-        // Read receipts: when other user reads the chat, unread_count resets to 0
-        if (updated.unread_count === 0) markAllRead();
+        // Read receipts: when other user reads the chat, unread_count resets to 0.
+        // Guard: ignore if WE just sent a message (chat update from our own send also has unread_count=0)
+        if (updated.unread_count === 0 && !justSentRef.current) markAllRead();
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
@@ -503,6 +516,10 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       if (error) { showToast('Failed to edit message', 'error'); return; }
       setEditingMessage(null);
     } else {
+      // Flag that WE just sent — suppress markAllRead for 3s so our message
+      // doesn't immediately get blue ticks before the other user reads it
+      justSentRef.current = true;
+      setTimeout(() => { justSentRef.current = false; }, 3000);
       onSendMessage(chat.id, text);
     }
     setMessage('');
