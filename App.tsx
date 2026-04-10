@@ -113,6 +113,8 @@ const App: React.FC = () => {
   const [showPostCallModal, setShowPostCallModal] = useState(false);
   const queueChannelRef = useRef<any>(null); // holds active matchmaking subscription
   const lastRandomPartnerRef = useRef<{ contact: import('./types').Contact; callId: string } | null>(null);
+  // IDs of calls initiated by random matching — these must NOT show IncomingCallModal
+  const randomCallIdsRef = useRef<Set<string>>(new Set());
 
   // Auto-dismiss toast after 3 seconds
   useEffect(() => {
@@ -307,6 +309,11 @@ const App: React.FC = () => {
         // Only show if call is within 45 seconds (generous window for slow networks)
         if (now - callTime < 45000) {
           if (user.blockedUserIds?.includes(row.caller_id)) return;
+          // ── Skip IncomingCallModal for random/matched calls ──────────────────
+          // If we are already in an active call, searching, or this call ID was
+          // created by random matching — do NOT show the accept/reject modal.
+          if (randomCallIdsRef.current.has(row.id)) return;
+          if (activeCall || isSearchingRandomCall) return;
           // Try contacts first, then fetch from DB for fresh info
           let callerContact = contacts.find(c => c.id === row.caller_id);
           if (!callerContact) {
@@ -694,6 +701,9 @@ const App: React.FC = () => {
     // Remember this random call partner so we can show the post-call modal
     lastRandomPartnerRef.current = { contact: partnerContact, callId };
     setLastCalledUser(partnerContact);
+
+    // Register this callId so the incoming-call listener never shows the modal for it
+    randomCallIdsRef.current.add(callId);
 
     // Insert a calls row so WebRTC signaling works and history is populated
     try {
