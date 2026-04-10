@@ -1064,13 +1064,7 @@ const App: React.FC = () => {
           />
         );
       case 'Rooms':
-        return (
-          <RoomsScreen
-            user={user}
-            contacts={contacts}
-            onRoomSelect={handleRoomSelect}
-          />
-        );
+        return null; // Rooms feature temporarily disabled
       default:
         return <ChatList chats={chats} activeFilter="All" onChatSelect={setSelectedChat} onChatLongPress={setChatToDelete} />;
     }
