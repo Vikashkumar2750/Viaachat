@@ -52,6 +52,7 @@ export interface Message {
   timestamp: any;
   type?: 'text' | 'video' | 'sticker' | 'gif' | 'image' | 'audio' | 'file';
   isPinned?: boolean;
+  isRead?: boolean; // true = blue double tick, false/undefined = grey single tick
   reactions?: { [emoji: string]: string[] };
 }
 

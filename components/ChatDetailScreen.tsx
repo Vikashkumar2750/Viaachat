@@ -81,8 +81,25 @@ const dbToMessage = (row: any): Message => ({
   timestamp: row.timestamp,
   type: row.type || 'text',
   isPinned: row.is_pinned || false,
+  isRead: false, // will be set based on chat unread_count
   reactions: row.reactions || {},
 });
+
+// ─── Show browser notification (when app is minimized) ────────────────────────
+function showBrowserNotification(title: string, body: string, icon = '/icon-192.png') {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (document.hidden) { // only when app is in background
+    try {
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.ready.then(reg => {
+          reg.showNotification(title, { body, icon, badge: icon, vibrate: [200, 100, 200] });
+        }).catch(() => {});
+      } else {
+        new Notification(title, { body, icon });
+      }
+    } catch {}
+  }
+}
 
 // ─── Typing dots ─────────────────────────────────────────────────────────────
 const TypingDots: React.FC = () => (
@@ -155,9 +172,17 @@ const MessageBubble: React.FC<{
           {message.isPinned && (
             <span className={`text-[9px] font-black uppercase tracking-widest ${isYou ? 'text-white/50' : 'text-emerald-500'}`}>📌 Pinned</span>
           )}
-          <p className={`text-[10px] text-right mt-1 opacity-60 ${isImage ? 'absolute bottom-2 right-2 bg-black/30 px-1.5 py-0.5 rounded-full text-white' : ''}`}>
-            {formatTime(message.timestamp)}
-          </p>
+          <div className={`flex items-center justify-end gap-1 mt-1 ${isImage ? 'absolute bottom-2 right-2 bg-black/30 px-1.5 py-0.5 rounded-full' : ''}`}>
+            <p className={`text-[10px] opacity-60 ${isImage ? 'text-white' : ''}`}>
+              {formatTime(message.timestamp)}
+            </p>
+            {/* Sent/Read ticks — only for your own messages */}
+            {isYou && (
+              message.isRead
+                ? <CheckCheck size={12} className="text-blue-400 flex-shrink-0" />
+                : <Check size={12} className="text-white/50 flex-shrink-0" />
+            )}
+          </div>
         </div>
 
         {/* Reactions display */}
@@ -299,7 +324,11 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       .range(pageNum * PAGE_SIZE, (pageNum + 1) * PAGE_SIZE - 1);
 
     if (data) {
-      const sorted = data.reverse().map(dbToMessage);
+      // Mark messages as read: if current unread_count is 0, all messages the
+      // OTHER user sent have been read. Messages WE sent are always "delivered" (✓).
+      // When the OTHER user opens the chat, unread_count becomes 0 and realtime
+      // fires, which triggers markAllRead below.
+      const sorted = data.reverse().map(row => ({ ...dbToMessage(row), isRead: true }));
       if (append) {
         setMessages(prev => [...sorted, ...prev]);
       } else {
@@ -308,6 +337,12 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       setHasMore(data.length === PAGE_SIZE);
     }
   }, [chat.id]);
+
+  // Mark all MY outgoing messages as read when the other user opens the chat
+  // (signaled by unread_count dropping to 0 via realtime update on chats table)
+  const markAllRead = useCallback(() => {
+    setMessages(prev => prev.map(m => ({ ...m, isRead: true })));
+  }, []);
 
   useEffect(() => {
     fetchMessages(0);
@@ -321,10 +356,18 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         table: 'chat_messages',
         filter: `chat_id=eq.${chat.id}`,
       }, (payload) => {
+        const newMsg = dbToMessage(payload.new as any);
         setMessages(prev => {
-          // Avoid duplicates
-          if (prev.some(m => m.id === (payload.new as any).id)) return prev;
-          return [...prev, dbToMessage(payload.new as any)];
+          if (prev.some(m => m.id === newMsg.id)) return prev;
+          // Show browser notification for messages from others when app is hidden
+          if (newMsg.senderId !== myId) {
+            const chatName = chat.name || newMsg.senderName || 'New message';
+            const preview = newMsg.type === 'image' ? '📷 Image'
+              : newMsg.type === 'audio' ? '🎤 Voice message'
+              : newMsg.text.slice(0, 80);
+            showBrowserNotification(chatName, preview);
+          }
+          return [...prev, newMsg];
         });
       })
       .on('postgres_changes', {
@@ -368,7 +411,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     }
   }, [hasMore, loadingMore, page, fetchMessages]);
 
-  // ─── Typing indicator ────────────────────────────────────────────────────
+  // ─── Typing indicator + Read receipts ───────────────────────────────────
   useEffect(() => {
     const channel = supabase
       .channel(`chat-typing-${chat.id}`)
@@ -378,15 +421,19 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         table: 'chats',
         filter: `id=eq.${chat.id}`,
       }, (payload) => {
-        const ts = (payload.new as any).typing_status || {};
+        const updated = payload.new as any;
+        // Typing status
+        const ts = updated.typing_status || {};
         const typing = Object.entries(ts)
           .filter(([uid, isTyping]) => isTyping && uid !== myId)
           .map(([uid]) => uid);
         setTypingUsers(typing);
+        // Read receipts: when other user reads the chat, unread_count resets to 0
+        if (updated.unread_count === 0) markAllRead();
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [chat.id, myId]);
+  }, [chat.id, myId, markAllRead]);
 
   // ─── Presence: online indicator ──────────────────────────────────────────
   useEffect(() => {

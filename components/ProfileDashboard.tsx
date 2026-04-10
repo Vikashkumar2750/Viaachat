@@ -237,6 +237,32 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
     }
   };
 
+  const handleUpgradeAccount = useCallback(async () => {
+    // Sign out the anon session — the app's login screen will appear
+    // where user can choose email signup or Google
+    try { await signOut(); } catch {}
+    onClose();
+  }, [onClose]);
+
+  const handleRequestNotifications = useCallback(async () => {
+    if (!('Notification' in window)) {
+      alert('Notifications are not supported in this browser.');
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm === 'granted') {
+      // Show a test notification
+      new Notification('ViaaChat Notifications Enabled! 🔔', {
+        body: 'You will now receive notifications for new messages and calls.',
+        icon: '/icon-192.png',
+      });
+      updateSetting('notifMessages', true);
+      updateSetting('notifCalls', true);
+    } else {
+      alert('Notification permission denied. Please allow it from browser settings.');
+    }
+  }, [updateSetting]);
+
   const handleLogout = async () => {
     try { await signOut(); } catch {}
     onClose();
@@ -430,24 +456,61 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
 
   // ── Section renderer ──────────────────────────────────────────────────────
   const renderSection = () => {
-    if (section === 'notifications') return (
-      <div>
-        <Section title="Call Alerts">
-          <Row icon={<Phone size={16} />} label="Incoming Calls" sub="Ring when someone calls"
-            right={<Toggle value={settings.notifCalls} onChange={v => updateSetting('notifCalls', v)} />} />
-        </Section>
-        <Section title="Messages">
-          <Row icon={<Bell size={16} />} label="New Messages" sub="Notify for new messages"
-            right={<Toggle value={settings.notifMessages} onChange={v => updateSetting('notifMessages', v)} />} />
-        </Section>
-        <Section title="Sound & Vibration">
-          <Row icon={<Volume2 size={16} />} label="Sounds"
-            right={<Toggle value={settings.notifSounds} onChange={v => updateSetting('notifSounds', v)} />} />
-          <Row icon={<Smartphone size={16} />} label="Vibration"
-            right={<Toggle value={settings.notifVibrate} onChange={v => updateSetting('notifVibrate', v)} />} />
-        </Section>
-      </div>
-    );
+    if (section === 'notifications') {
+      const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
+      return (
+        <div>
+          {/* Permission status card */}
+          <div className={`mx-0 mb-4 px-4 py-3 rounded-2xl border ${
+            notifStatus === 'granted' ? 'bg-emerald-500/10 border-emerald-500/20'
+            : notifStatus === 'denied' ? 'bg-red-500/10 border-red-500/20'
+            : 'bg-amber-500/10 border-amber-500/20'
+          }`}>
+            <p className={`text-sm font-bold mb-0.5 ${
+              notifStatus === 'granted' ? 'text-emerald-400'
+              : notifStatus === 'denied' ? 'text-red-400' : 'text-amber-400'
+            }`}>
+              {notifStatus === 'granted' ? '🔔 Notifications enabled' :
+               notifStatus === 'denied' ? '🚫 Notifications blocked' :
+               notifStatus === 'unsupported' ? '⚠️ Not supported' :
+               '⏳ Notifications not yet allowed'}
+            </p>
+            <p className="text-xs text-white/40">
+              {notifStatus === 'granted' ? 'You will receive alerts for messages and calls.'
+              : notifStatus === 'denied' ? 'Go to browser Settings → Site Settings → Notifications to allow.'
+              : notifStatus === 'unsupported' ? 'Your browser does not support notifications.'
+              : 'Tap the button below to enable browser notifications.'}
+            </p>
+            {notifStatus !== 'granted' && notifStatus !== 'denied' && notifStatus !== 'unsupported' && (
+              <button onClick={handleRequestNotifications}
+                className="mt-2.5 w-full py-2.5 bg-emerald-500 text-white text-sm font-black rounded-xl hover:bg-emerald-600 active:scale-95 transition-all">
+                Enable Notifications
+              </button>
+            )}
+          </div>
+
+          <div className="mb-4 px-4 py-3 bg-blue-500/10 border border-blue-500/20 rounded-2xl">
+            <p className="text-xs text-blue-400 font-bold mb-1">📱 Background notifications</p>
+            <p className="text-xs text-white/40">To receive notifications when the app is closed, install ViaaChat as an app (PWA) on your device. Go to Settings → Install App.</p>
+          </div>
+
+          <Section title="Call Alerts">
+            <Row icon={<Phone size={16} />} label="Incoming Calls" sub="Ring when someone calls"
+              right={<Toggle value={settings.notifCalls} onChange={v => updateSetting('notifCalls', v)} />} />
+          </Section>
+          <Section title="Messages">
+            <Row icon={<Bell size={16} />} label="New Messages" sub="Notify for new messages"
+              right={<Toggle value={settings.notifMessages} onChange={v => updateSetting('notifMessages', v)} />} />
+          </Section>
+          <Section title="Sound &amp; Vibration">
+            <Row icon={<Volume2 size={16} />} label="Sounds"
+              right={<Toggle value={settings.notifSounds} onChange={v => updateSetting('notifSounds', v)} />} />
+            <Row icon={<Smartphone size={16} />} label="Vibration"
+              right={<Toggle value={settings.notifVibrate} onChange={v => updateSetting('notifVibrate', v)} />} />
+          </Section>
+        </div>
+      );
+    }
 
     if (section === 'privacy') return (
       <div>
@@ -536,7 +599,9 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-5">
             <p className="text-sm font-bold text-amber-400 mb-1">👤 Guest Account</p>
             <p className="text-xs text-white/50 mb-3">Your data is temporary. Sign up to save everything across devices.</p>
-            <button className="w-full py-2.5 bg-amber-500 text-white text-sm font-black rounded-xl hover:bg-amber-600 transition-all">
+            <button
+              onClick={handleUpgradeAccount}
+              className="w-full py-2.5 bg-amber-500 text-white text-sm font-black rounded-xl hover:bg-amber-600 active:scale-95 transition-all">
               Upgrade — Create Free Account
             </button>
           </div>
