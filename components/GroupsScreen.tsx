@@ -116,31 +116,41 @@ const CreateGroupModal: React.FC<{
     reader.readAsDataURL(file);
   };
 
+  const [createError, setCreateError] = useState('');
+
   const handleCreate = async () => {
     if (!name.trim()) return;
     setCreating(true);
+    setCreateError('');
     try {
-      const participants = [user.id, ...selected];
+      const userId = user.id || (user as any).uid;
+      const participants = [userId, ...selected];
+
+      // Only insert columns that exist in the chats schema
       const { data, error } = await supabase.from('chats').insert({
         name: name.trim(),
         description: description.trim() || null,
         is_group: true,
         participants,
-        created_by: user.id,
-        admins: [user.id],
+        created_by: userId,
+        admins: [userId],
         avatar_url: avatarPreview || null,
-        is_locked: privacy === 'private',
-        created_at: new Date().toISOString(),
         last_message: '',
         last_message_time: new Date().toISOString(),
         unread_count: 0,
-        member_count: participants.length,
+        is_pinned: false,
+        message_type: 'text',
         pinned_message_ids: [],
         is_muted: false,
         typing_status: {},
       }).select().single();
 
-      if (error) throw error;
+      if (error) {
+        console.error('Create group DB error:', error);
+        setCreateError(error.message || 'Failed to create group. Try again.');
+        return;
+      }
+
       if (data) {
         onCreated({
           id: data.id,
@@ -162,10 +172,11 @@ const CreateGroupModal: React.FC<{
           isMuted: false,
           typingStatus: {},
         });
+        onClose();
       }
-      onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Create group failed:', err);
+      setCreateError(err?.message || 'Unexpected error. Please try again.');
     } finally {
       setCreating(false);
     }
@@ -183,20 +194,20 @@ const CreateGroupModal: React.FC<{
           <h2 className="text-base font-black text-white flex-1">
             {step === 'info' ? 'New Group' : 'Add Members'}
           </h2>
-          {step === 'info' ? (
-            <button onClick={() => name.trim() && setStep('members')} disabled={!name.trim()}
-              className="text-emerald-400 font-bold text-sm disabled:text-white/20 transition-colors">
-              Next
-            </button>
-          ) : (
-            <button onClick={handleCreate} disabled={creating}
-              className="flex items-center gap-1 text-emerald-400 font-bold text-sm disabled:text-white/20">
-              {creating ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-              Create
-            </button>
-          )}
+          <button onClick={handleCreate} disabled={creating || !name.trim()}
+            className="flex items-center gap-1 text-emerald-400 font-bold text-sm disabled:text-white/20 transition-colors">
+            {creating ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            Create
+          </button>
         </div>
       </div>
+
+      {/* Error banner */}
+      {createError ? (
+        <div className="flex-shrink-0 mx-4 mt-3 bg-red-500/15 border border-red-500/30 rounded-2xl px-4 py-3">
+          <p className="text-sm text-red-400 font-semibold">{createError}</p>
+        </div>
+      ) : null}
 
       {step === 'info' ? (
         <div className="flex-1 overflow-y-auto px-4 py-5 space-y-5">
@@ -261,6 +272,14 @@ const CreateGroupModal: React.FC<{
               ))}
             </div>
           </div>
+          {/* Add members shortcut */}
+          <button
+            onClick={() => name.trim() && setStep('members')}
+            disabled={!name.trim()}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border border-white/10 bg-white/5 text-white/60 text-sm font-bold hover:bg-white/8 active:scale-95 transition-all disabled:opacity-30"
+          >
+            <Users size={16} /> Add members (optional)
+          </button>
         </div>
       ) : (
         <div className="flex-1 flex flex-col overflow-hidden">
