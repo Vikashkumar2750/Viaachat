@@ -101,48 +101,85 @@ function showBrowserNotification(title: string, body: string, icon = '/icon-192.
   }
 }
 
-// ─── Avatar Typing Indicator ─────────────────────────────────────────────────
-// Shows the typing user's avatar with animated dots — appears while typing,
-// disappears when they stop or leave the chat.
+// ─── Snapchat-style Avatar Typing Indicator ───────────────────────────────────
+// Layout: [avatar peeking up] + [floating speech bubble with dots above-right]
+// Behavior: springs in from bottom, avatar breathes, dots wave, whole thing exits
+// on unmount (typing stopped / user left chat).
 const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl, name }) => (
-  <div className="flex items-end gap-2 mb-1" style={{ animation: 'fadeSlideIn 0.2s ease-out' }}>
-    {/* Avatar with a subtle pulse ring */}
-    <div className="relative flex-shrink-0">
-      <div className="absolute inset-0 rounded-full bg-emerald-400/30 animate-ping" style={{ animationDuration: '1.8s' }} />
+  <div
+    className="flex items-end gap-1.5"
+    style={{ animation: 'scPeekIn 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) both' }}
+  >
+    {/* Avatar — breathing idle animation, slightly large like Snapchat's Bitmoji */}
+    <div
+      className="relative flex-shrink-0 w-10 h-10"
+      style={{ animation: 'scBreathe 3.2s ease-in-out infinite' }}
+    >
       <img
         src={avatarUrl}
         alt={name}
-        className="relative w-8 h-8 rounded-full object-cover border-2 border-white shadow-sm"
+        className="w-10 h-10 rounded-full object-cover shadow-md"
         referrerPolicy="no-referrer"
+        style={{ border: '2.5px solid #fff', boxShadow: '0 2px 12px rgba(0,0,0,0.13)' }}
       />
     </div>
 
-    {/* Speech bubble with dots */}
-    <div className="flex items-center gap-1.5 bg-white px-3.5 py-2.5 rounded-2xl rounded-bl-none shadow-sm border border-gray-100">
-      {[0, 1, 2].map(i => (
-        <span
-          key={i}
-          className="block w-1.5 h-1.5 rounded-full bg-gray-400"
-          style={{
-            animation: 'typingBounce 1.2s ease-in-out infinite',
-            animationDelay: `${i * 0.18}s`,
-          }}
-        />
-      ))}
+    {/* Speech bubble — floats right and slightly up from avatar */}
+    <div className="flex flex-col items-start mb-1">
+      {/* Main bubble */}
+      <div
+        className="flex items-center gap-[5px] bg-white px-[14px] py-[10px] shadow-md"
+        style={{
+          borderRadius: '22px 22px 22px 6px',
+          boxShadow: '0 2px 14px rgba(0,0,0,0.10)',
+          border: '1px solid rgba(0,0,0,0.05)',
+        }}
+      >
+        {[0, 1, 2].map(i => (
+          <span
+            key={i}
+            className="block rounded-full"
+            style={{
+              width: 8, height: 8,
+              background: '#aeb0b8',
+              animation: 'scDot 1.4s ease-in-out infinite',
+              animationDelay: `${i * 0.18}s`,
+            }}
+          />
+        ))}
+      </div>
+      {/* Small decorative circle tail — Snapchat style */}
+      <div
+        style={{
+          width: 7, height: 7,
+          background: '#fff',
+          borderRadius: '50%',
+          marginLeft: 6,
+          marginTop: -2,
+          boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+          border: '1px solid rgba(0,0,0,0.05)',
+        }}
+      />
     </div>
 
+    {/* Keyframe definitions — inlined once on first render */}
     <style>{`
-      @keyframes typingBounce {
-        0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-        30% { transform: translateY(-5px); opacity: 1; }
+      @keyframes scPeekIn {
+        0%   { opacity: 0; transform: translateY(18px) scale(0.85); }
+        100% { opacity: 1; transform: translateY(0) scale(1); }
       }
-      @keyframes fadeSlideIn {
-        from { opacity: 0; transform: translateY(6px); }
-        to   { opacity: 1; transform: translateY(0); }
+      @keyframes scBreathe {
+        0%, 100% { transform: scale(1);    }
+        50%       { transform: scale(1.06); }
+      }
+      @keyframes scDot {
+        0%, 60%, 100% { transform: scale(0.72); opacity: 0.35; }
+        30%           { transform: scale(1.28); opacity: 1.0;  }
       }
     `}</style>
   </div>
 );
+
 
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 const MessageBubble: React.FC<{
