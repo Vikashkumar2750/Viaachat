@@ -3,8 +3,8 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ArrowLeft, Video, Phone, Smile, Paperclip, Send,
   Mic, MicOff, Image as ImageIcon, X, Shield, MoreVertical,
-  Edit3, Trash2, CheckCheck, Check, Play, Pause, Search,
-  ChevronDown,
+  Edit3, Trash2, Eye, EyeOff, Play, Pause, Search,
+  ChevronDown, CornerUpLeft,
 } from 'lucide-react';
 import { supabase, handleSupabaseError } from '../supabase';
 import type { Chat, Message, Contact } from '../types';
@@ -81,8 +81,11 @@ const dbToMessage = (row: any): Message => ({
   timestamp: row.timestamp,
   type: row.type || 'text',
   isPinned: row.is_pinned || false,
-  isRead: false, // will be set based on chat unread_count
+  isRead: false,
   reactions: row.reactions || {},
+  replyToId:     row.reply_to?.id     || null,
+  replyToText:   row.reply_to?.text   || null,
+  replyToSender: row.reply_to?.sender || null,
 });
 
 // ─── Show browser notification (when app is minimized) ────────────────────────
@@ -189,11 +192,38 @@ const MessageBubble: React.FC<{
   onDelete: () => void;
   onEdit: () => void;
   onPin: () => void;
-}> = ({ message, myId, onReact, onDelete, onEdit, onPin }) => {
+  onReply: (msg: Message) => void;
+}> = ({ message, myId, onReact, onDelete, onEdit, onPin, onReply }) => {
   const isYou = message.senderId === myId;
   const [showReactions, setShowReactions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // ── Swipe-to-reply ───────────────────────────────────────────────────────
+  const touchStartX  = useRef(0);
+  const touchStartY  = useRef(0);
+  const [swipeX, setSwipeX] = useState(0);
+  const SWIPE_THRESHOLD = 60;
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+    setSwipeX(0);
+  };
+  const handleTouchMove = (e: React.TouchEvent) => {
+    const dx = e.touches[0].clientX - touchStartX.current;
+    const dy = e.touches[0].clientY - touchStartY.current;
+    if (Math.abs(dy) > Math.abs(dx) + 6) return; // vertical scroll wins
+    if (dx < 4) { setSwipeX(0); return; }        // left swipe ignored
+    setSwipeX(Math.min(80, dx));
+  };
+  const handleTouchEnd = () => {
+    if (swipeX >= SWIPE_THRESHOLD) {
+      onReply(message);
+      try { navigator.vibrate(35); } catch {}
+    }
+    setSwipeX(0);
+  };
 
   const formatTime = (ts: any) => {
     if (!ts) return '';
@@ -219,7 +249,39 @@ const MessageBubble: React.FC<{
 
   return (
     <div className={`flex ${isYou ? 'justify-end' : 'justify-start'} mb-3 group relative`}>
-      <div className="relative max-w-[80%]">
+      {/* Swipe-to-reply ring: grows in from left as you swipe right */}
+      {swipeX > 6 && (
+        <div
+          className="absolute left-0 top-1/2 z-10 pointer-events-none"
+          style={{
+            transform: `translateY(-50%) scale(${0.5 + 0.5 * Math.min(1, swipeX / SWIPE_THRESHOLD)})`,
+            opacity: Math.min(1, swipeX / SWIPE_THRESHOLD),
+          }}
+        >
+          <div className="w-9 h-9 rounded-full bg-emerald-100 border border-emerald-200 flex items-center justify-center shadow-sm">
+            <CornerUpLeft size={17} className="text-emerald-500" />
+          </div>
+        </div>
+      )}
+
+      <div
+        className="relative max-w-[80%]"
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        style={{
+          transform: `translateX(${swipeX}px)`,
+          transition: swipeX === 0 ? 'transform 0.28s cubic-bezier(0.34,1.56,0.64,1)' : 'none',
+          willChange: 'transform',
+        }}
+      >
+        {/* Quoted reply preview */}
+        {message.replyToText && (
+          <div className={`flex flex-col mb-1.5 px-3 py-1.5 rounded-xl border-l-[3px] border-emerald-400 ${isYou ? 'bg-emerald-50/80' : 'bg-gray-100'}`}>
+            <span className="text-[10px] font-black text-emerald-500 truncate">{message.replyToSender}</span>
+            <span className="text-[11px] text-gray-500 leading-snug line-clamp-2">{message.replyToText}</span>
+          </div>
+        )}
         <div
           className={`rounded-2xl ${
             isImage ? 'p-0 overflow-hidden' : 'px-4 py-2'
@@ -255,13 +317,11 @@ const MessageBubble: React.FC<{
             <p className={`text-[10px] opacity-60 ${isImage ? 'text-white' : 'text-gray-500'}`}>
               {formatTime(message.timestamp)}
             </p>
-            {/* Sent/Read ticks — only for YOUR messages */}
+            {/* Eye icon: open = other user has seen it, closed = unseen */}
             {isYou && (
               message.isRead
-                // Blue ✓✓ = read by other user
-                ? <CheckCheck size={14} className={isImage ? 'text-blue-300' : 'text-blue-500'} />
-                // Grey ✓ = sent/delivered, not yet read
-                : <Check size={14} className={isImage ? 'text-white/60' : 'text-gray-400'} />
+                ? <Eye    size={13} className={isImage ? 'text-blue-300'  : 'text-blue-500'} />
+                : <EyeOff size={13} className={isImage ? 'text-white/50'  : 'text-gray-400'} />
             )}
           </div>
         </div>
@@ -355,6 +415,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const [isAttachmentOpen, setIsAttachmentOpen] = useState(false);
   const [isEmojiOpen, setIsEmojiOpen] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [replyTo,     setReplyTo]     = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -591,7 +652,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     if (!text && !editingMessage) return;
 
     if (editingMessage) {
-      // Edit existing message
       const { error } = await supabase
         .from('chat_messages')
         .update({ text: text + ' (edited)' })
@@ -599,12 +659,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       if (error) { showToast('Failed to edit message', 'error'); return; }
       setEditingMessage(null);
     } else {
-      // ── Optimistic update: show message instantly, before realtime fires ──
-      // The realtime INSERT handler deduplicates by ID, so the real row
-      // arriving from DB won't create a duplicate — it just gets appended
-      // alongside (temp id won't match real UUID, both show briefly, then
-      // next re-render from realtime replaces). To avoid temp flicker we
-      // replace on the next realtime INSERT if sender matches.
+      // Optimistic update — visible instantly
       const optimisticMsg: import('../types').Message = {
         id: `temp-${Date.now()}`,
         text,
@@ -615,19 +670,44 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         isRead: false,
         isPinned: false,
         reactions: {},
+        replyToId:     replyTo?.id         || null,
+        replyToText:   replyTo?.text       || null,
+        replyToSender: replyTo?.senderName || null,
       };
       setMessages(prev => [...prev, optimisticMsg]);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
 
-      // Suppress markAllRead for 3s
       justSentRef.current = true;
       setTimeout(() => { justSentRef.current = false; }, 3000);
 
-      // Actual DB insert (via App.tsx handleSendMessage)
-      onSendMessage(chat.id, text);
+      // Direct DB insert (reply_to JSONB — run migration SQL if column missing)
+      const payload: Record<string, any> = {
+        chat_id: chat.id, text, sender_id: myId, sender_name: myName,
+        timestamp: new Date().toISOString(), type: 'text',
+      };
+      if (replyTo) {
+        payload.reply_to = {
+          id: replyTo.id,
+          text: replyTo.text.slice(0, 200),
+          sender: replyTo.senderName,
+        };
+      }
+      const { error: sendErr } = await supabase.from('chat_messages').insert(payload);
+      if (sendErr?.message?.includes('reply_to')) {
+        // reply_to column not yet created — retry without it
+        delete payload.reply_to;
+        await supabase.from('chat_messages').insert(payload);
+      }
+      await supabase.from('chats').update({
+        last_message: text,
+        last_message_time: new Date().toISOString(),
+      }).eq('id', chat.id);
+
+      setReplyTo(null);
     }
     setMessage('');
     setIsEmojiOpen(false);
+    setIsAttachmentOpen(false);
     updateTypingStatus(false);
   };
 
@@ -900,6 +980,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
             onDelete={() => handleDeleteMessage(msg.id)}
             onEdit={() => { setEditingMessage(msg); setMessage(msg.text.replace(' (edited)', '')); }}
             onPin={() => handlePinMessage(msg)}
+            onReply={m => { setReplyTo(m); setIsEmojiOpen(false); setIsAttachmentOpen(false); }}
           />
         ))}
         {typingUsers.length > 0 && (
@@ -954,6 +1035,24 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Reply banner — shows quoted message above input when replying */}
+      {replyTo && (
+        <div className="px-4 py-2 bg-white border-t border-emerald-100 flex items-center gap-2 border-l-[3px] border-l-emerald-400">
+          <CornerUpLeft size={14} className="text-emerald-500 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] font-black text-emerald-500 truncate">
+              {replyTo.senderName === myName ? 'You' : replyTo.senderName}
+            </p>
+            <p className="text-[11px] text-gray-500 truncate leading-tight">
+              {replyTo.type === 'image' ? '📷 Photo' : replyTo.type === 'audio' ? '🎤 Voice' : replyTo.text.slice(0, 80)}
+            </p>
+          </div>
+          <button onClick={() => setReplyTo(null)} className="text-gray-400 hover:text-gray-600 flex-shrink-0 p-1">
+            <X size={14} />
+          </button>
         </div>
       )}
 

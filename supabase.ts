@@ -193,6 +193,17 @@ export async function updateUserPresence(userId: string) {
     .eq('id', userId);
 }
 
+// Set last_seen to Unix epoch — instantly appears offline to all presence checks.
+// Called on visibilitychange(hidden) and pagehide so the user goes offline the
+// moment they switch tabs or close the app — no 2-minute stale window.
+export async function setUserOffline(userId: string) {
+  if (!userId) return;
+  await supabase
+    .from('users')
+    .update({ last_seen: new Date(0).toISOString() })
+    .eq('id', userId);
+}
+
 
 // ===========================
 // MESSAGING HELPERS

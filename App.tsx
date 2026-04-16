@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { SearchBar } from './components/SearchBar';
@@ -28,6 +28,7 @@ import {
   supabase,
   syncUser,
   updateUserPresence,
+  setUserOffline,
   markChatAsRead,
   handleSupabaseError,
   isSupabaseConfigured,
@@ -213,14 +214,26 @@ const App: React.FC = () => {
   // ─── Presence: update lastSeen immediately + every 60 seconds ───────────────
   useEffect(() => {
     if (!user?.id) return;
-    updateUserPresence(user.id); // immediate on login
-    const interval = setInterval(() => updateUserPresence(user.id), 30000) // 30s (matches 2-min online threshold);
-    // Also update on tab focus
-    const onFocus = () => updateUserPresence(user.id);
-    window.addEventListener('focus', onFocus);
+    const uid = user.id;
+    updateUserPresence(uid); // immediate on login/tab open
+    const interval = setInterval(() => updateUserPresence(uid), 30000); // 30s heartbeat
+
+    // ── Instant offline: set last_seen=epoch the moment user leaves ──────────
+    const goOffline = () => setUserOffline(uid);
+    const goOnline  = () => updateUserPresence(uid);
+    const onVisibility = () => { if (document.hidden) goOffline(); else goOnline(); };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus',    goOnline);
+    window.addEventListener('pagehide', goOffline);
+    window.addEventListener('blur',     goOffline); // covers mobile backgrounding
+
     return () => {
       clearInterval(interval);
-      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus',    goOnline);
+      window.removeEventListener('pagehide', goOffline);
+      window.removeEventListener('blur',     goOffline);
     };
   }, [user?.id]);
 
@@ -718,7 +731,7 @@ const App: React.FC = () => {
       }, { onConflict: 'id' });
     } catch { /* non-fatal */ }
 
-    // 2. CRITICAL: call_signals row � CallScreen receiver polls this for the WebRTC offer.
+    // 2. CRITICAL: call_signals row � CallScreen receiver polls this for the WebRTC offer.
     // Without this row, receiver always fails with "No call signal received".
     try {
       await supabase.from('call_signals').upsert({

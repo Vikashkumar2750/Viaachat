@@ -52,8 +52,12 @@ export interface Message {
   timestamp: any;
   type?: 'text' | 'video' | 'sticker' | 'gif' | 'image' | 'audio' | 'file';
   isPinned?: boolean;
-  isRead?: boolean; // true = blue double tick, false/undefined = grey single tick
+  isRead?: boolean; // true = 👁️ Eye open (seen), false = 👁️‍🗨️ Eye closed (unseen)
   reactions?: { [emoji: string]: string[] };
+  // Swipe-to-reply quote fields (persisted via reply_to JSONB in DB)
+  replyToId?:     string | null;
+  replyToText?:   string | null;
+  replyToSender?: string | null;
 }
 
 export interface Call {
