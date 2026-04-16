@@ -17,33 +17,22 @@ interface CallScreenProps {
   onEndCall: () => void;
 }
 
-// ─── ICE Servers ──────────────────────────────────────────────────────────────
-// Multiple free STUN + reliable TURN servers (openrelay was shut down — removed)
+// ─── ICE / STUN / TURN servers ────────────────────────────────────────────────
+// openrelay.metered.ca was shut down — replaced with metered.ca free tier + extras
 const RTCConfig: RTCConfiguration = {
   iceServers: [
-    // Google STUN (free, always reliable)
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
-    // Cloudflare STUN
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302'] },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Free TURN servers — multiple for fallback
-    // Metered.ca free tier
+    // Metered.ca free TURN (replaces dead openrelay)
     {
-      urls: ['turn:global.relay.metered.ca:80', 'turn:global.relay.metered.ca:80?transport=tcp'],
+      urls: [
+        'turn:global.relay.metered.ca:80',
+        'turn:global.relay.metered.ca:80?transport=tcp',
+        'turn:global.relay.metered.ca:443',
+        'turns:global.relay.metered.ca:443',
+      ],
       username: 'e8dd65f0c0cb3ef15a1c5b7a',
       credential: 'uMBbPwdFroHpfDGS',
-    },
-    {
-      urls: ['turns:global.relay.metered.ca:443', 'turns:global.relay.metered.ca:443?transport=tcp'],
-      username: 'e8dd65f0c0cb3ef15a1c5b7a',
-      credential: 'uMBbPwdFroHpfDGS',
-    },
-    // Numb TURN (open, no auth)
-    { urls: 'stun:numb.viagenie.ca' },
-    // Xirsys free TURN (public demo)
-    {
-      urls: ['turn:fr-turn.xirsys.com:80?transport=udp', 'turn:fr-turn.xirsys.com:3478?transport=udp'],
-      username: 'UVxe2BFiLLFSiA-KNFrNqibVJAUhMqlCLicQqiPNRmolm4MnV7e7_Pu4JbsLx-LeAAAAAGW_6DFvcGlhYWNoYXQ=',
-      credential: '12345678-0000-0000-0000-000000000000',
     },
   ],
   iceCandidatePoolSize: 10,
@@ -51,7 +40,24 @@ const RTCConfig: RTCConfiguration = {
   rtcpMuxPolicy: 'require',
 };
 
-// ─── Ring tone ─────────────────────────────────────────────────────────────────
+// ─── Debug logger ─────────────────────────────────────────────────────────────
+const log = (...args: any[]) => console.log('[VC]', ...args);
+
+// ─── Safe broadcast send (returns Promise, never throws) ──────────────────────
+const bcastSend = (ch: any, event: string, payload: any): Promise<void> => {
+  return new Promise((resolve) => {
+    try {
+      const p = ch.send({ type: 'broadcast', event, payload });
+      if (p && typeof p.then === 'function') {
+        p.then(() => resolve()).catch(() => resolve());
+      } else {
+        resolve();
+      }
+    } catch { resolve(); }
+  });
+};
+
+// ─── Ring tone ────────────────────────────────────────────────────────────────
 function useRingTone(active: boolean) {
   const ctxRef = useRef<AudioContext | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -69,13 +75,17 @@ function useRingTone(active: boolean) {
     } catch {}
   }, []);
   useEffect(() => {
-    if (!active) { if (timerRef.current) clearInterval(timerRef.current); ctxRef.current?.close().catch(() => {}); ctxRef.current = null; return; }
+    if (!active) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      ctxRef.current?.close().catch(() => {}); ctxRef.current = null;
+      return;
+    }
     ring(); timerRef.current = setInterval(ring, 2500);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [active, ring]);
 }
 
-// ─── Quality badge ─────────────────────────────────────────────────────────────
+// ─── Quality badge ────────────────────────────────────────────────────────────
 const CallQualityBadge: React.FC<{ pc: RTCPeerConnection | null }> = ({ pc }) => {
   const [rtt, setRtt] = useState(0); const [quality, setQuality] = useState(3);
   useEffect(() => {
@@ -97,10 +107,7 @@ const CallQualityBadge: React.FC<{ pc: RTCPeerConnection | null }> = ({ pc }) =>
   );
 };
 
-// ─── LOG helper (shows in console with [VC] prefix for easy filtering) ─────────
-const log = (...args: any[]) => console.log('[VC]', ...args);
-
-// ─── MAIN CALL SCREEN ──────────────────────────────────────────────────────────
+// ─── MAIN CALL SCREEN ─────────────────────────────────────────────────────────
 export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const [callStatus, setCallStatus]   = useState(call.isCaller ? 'Calling...' : 'Connecting...');
   const [duration, setDuration]       = useState(0);
@@ -115,6 +122,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  // CRITICAL: always mounted, never display:none — browser suspends audio engine otherwise
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
   const localStreamRef    = useRef<MediaStream | null>(null);
@@ -129,19 +137,23 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
 
   useRingTone(call.isCaller && callStatus === 'Calling...');
 
+  // ── Safely await a supabase query (never throws) ────────────────────────────
+  const dbExec = async (q: any): Promise<any> => {
+    try { return await q; } catch (e) { log('DB error (non-fatal):', e); return null; }
+  };
+
   // ── Play remote audio ────────────────────────────────────────────────────────
   const playAudio = useCallback(async () => {
-    const el = remoteAudioRef.current;
-    if (!el) return;
+    const el = remoteAudioRef.current; if (!el) return;
     el.volume = 1.0;
     try { await el.play(); setNeedsUnlock(false); log('Audio playing ✅'); }
-    catch (e) { log('Audio autoplay blocked, tap-to-unlock needed'); setNeedsUnlock(true); }
+    catch { log('Autoplay blocked → showing tap-to-hear banner'); setNeedsUnlock(true); }
   }, []);
 
-  // ── Attach remote stream ─────────────────────────────────────────────────────
+  // ── Attach remote stream to audio/video elements ─────────────────────────────
   const attachRemoteStream = useCallback((stream: MediaStream) => {
     if (!stream) return;
-    log('Attaching remote stream, tracks:', stream.getTracks().map(t => `${t.kind}[enabled=${t.enabled}]`));
+    log('Remote stream attached — tracks:', stream.getTracks().map(t => `${t.kind}[enabled=${t.enabled},muted=${t.muted}]`).join(', '));
     remoteStreamRef.current = stream;
     stream.getTracks().forEach(t => { t.enabled = true; });
 
@@ -149,15 +161,18 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     if (el) { el.srcObject = stream; playAudio(); }
 
     if (call.isVideo) {
-      const tryVideo = () => {
-        if (remoteVideoRef.current) { remoteVideoRef.current.srcObject = stream; remoteVideoRef.current.play().catch(() => {}); setRemoteVideoReady(true); }
-        else setTimeout(tryVideo, 80);
+      const attach = () => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = stream;
+          remoteVideoRef.current.play().catch(() => {});
+          setRemoteVideoReady(true);
+        } else { setTimeout(attach, 80); }
       };
-      tryVideo();
+      attach();
     }
   }, [call.isVideo, playAudio]);
 
-  // ── ICE buffering: queue candidates until remote desc is set ────────────────
+  // ── Buffer ICE candidates until remote desc is ready ─────────────────────────
   const drainPendingCandidates = useCallback(async () => {
     if (!pcRef.current || !pendingCandidates.current.length) return;
     const q = [...pendingCandidates.current]; pendingCandidates.current = [];
@@ -165,13 +180,13 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     for (const c of q) { try { await pcRef.current.addIceCandidate(new RTCIceCandidate(c)); } catch {} }
   }, []);
 
-  const addIceCandidate = useCallback(async (c: RTCIceCandidateInit) => {
+  const addIceCandidateSafe = useCallback(async (c: RTCIceCandidateInit) => {
     if (!c?.candidate) return;
     if (remoteDescSet.current && pcRef.current) {
-      try { await pcRef.current.addIceCandidate(new RTCIceCandidate(c)); log('ICE candidate added live'); }
+      try { await pcRef.current.addIceCandidate(new RTCIceCandidate(c)); log('ICE candidate added ✅'); }
       catch (e) { log('ICE add error:', e); }
     } else {
-      log('ICE candidate buffered (remote desc not set yet)');
+      log('ICE candidate queued (waiting for remote desc)');
       pendingCandidates.current.push(c);
     }
   }, []);
@@ -179,13 +194,14 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   // ── Cleanup ──────────────────────────────────────────────────────────────────
   const cleanup = useCallback(async (sendEnd = true) => {
     if (endedRef.current) return; endedRef.current = true;
-    log('Cleanup called, sendEnd=', sendEnd);
+    log('Cleanup, sendEnd =', sendEnd);
     if (sendEnd) {
       const secs = callStartTime.current ? Math.floor((Date.now() - callStartTime.current) / 1000) : 0;
-      // Broadcast end to partner instantly
-      channelsRef.current.forEach(ch => { try { ch.send?.({ type: 'broadcast', event: 'call-end', payload: {} }); } catch {} });
-      try { await supabase.from('call_signals').update({ status: 'ended' }).eq('id', call.callId); } catch {}
-      if (secs > 0) { try { await supabase.from('calls').update({ duration: secs }).eq('id', call.callId); } catch {} }
+      // Tell partner immediately via broadcast
+      channelsRef.current.forEach(ch => { try { bcastSend(ch, 'call-end', {}); } catch {} });
+      // Also update DB
+      await dbExec(supabase.from('call_signals').update({ status: 'ended' }).eq('id', call.callId));
+      if (secs > 0) await dbExec(supabase.from('calls').update({ duration: secs }).eq('id', call.callId));
     }
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     if (remoteAudioRef.current) { remoteAudioRef.current.pause(); remoteAudioRef.current.srcObject = null; }
@@ -196,46 +212,43 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   }, [call.callId]);
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // MAIN WebRTC SETUP
+  // SIGNALING ARCHITECTURE:
   //
-  // SIGNALING ARCHITECTURE (Bulletproof):
-  // ─────────────────────────────────────
-  // PRIMARY:  Supabase DB (call_signals + ice_candidates) via postgres_changes
-  //           → Persistent, survives tab backgrounding, never misses messages
-  // BONUS:    Supabase Broadcast on same channel for ~50ms speed boost
+  // PRIMARY (always works): DB → postgres_changes realtime
+  //   Caller saves offer to call_signals table.
+  //   Receiver polls DB + listens to postgres_changes UPDATE.
+  //   ICE candidates go to ice_candidates table + postgres_changes INSERT.
   //
-  // WHY NOT BROADCAST-ONLY:
-  //   - Broadcast is ephemeral. If receiver subscribes AFTER caller sends offer,
-  //     the offer is LOST forever. This was the main cause of call failures.
-  //   - DB + realtime postgres_changes is always reliable.
+  // BONUS (speed): Supabase Realtime Broadcast on shared channel vc-{callId}
+  //   All listeners registered BEFORE .subscribe() to avoid missing events.
+  //   Offers/answers/ICE also broadcast for ~50ms fast path.
   //
-  // ICE:
-  //   - Candidates are saved to ice_candidates table (indexed by signal_id + role)
-  //   - postgres_changes fires when new candidates arrive → add immediately
-  //   - Broadcast sends same candidates for sub-100ms fast path
+  // KEY FIX: All .on() handlers registered BEFORE .subscribe(). Previously
+  //   bcast.on('answer') and bcast.on('offer') were called AFTER .subscribe()
+  //   and were silently ignored by Supabase — causing all calls to fail via
+  //   the broadcast path.
   //
-  // TURN:
-  //   - openrelay.metered.ca was SHUT DOWN → replaced with metered.ca free tier
-  //   - Multiple TURN URLs for fallback
+  // KEY FIX 2: No .catch() chaining on Supabase query builders (PromiseLike).
+  //   All DB calls use try/await/catch or the dbExec() wrapper.
   // ─────────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     mountedRef.current = true;
     const mounted = () => mountedRef.current;
 
     const run = async () => {
-      // ── Step 1: Acquire microphone (and camera if video) ──────────────────
+      // ── 1. Get mic (and camera) ───────────────────────────────────────────
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: call.isVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false,
         });
-        log('Got media stream — audio tracks:', stream.getAudioTracks().length, 'video tracks:', stream.getVideoTracks().length);
+        log('Media acquired — audio:', stream.getAudioTracks().length, 'video:', stream.getVideoTracks().length);
       } catch {
-        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); log('Fallback: audio-only stream'); }
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); log('Audio-only fallback'); }
         catch (e) {
           log('getUserMedia failed:', e);
-          if (mounted()) { setCallStatus('Call Failed'); setConnectionError('Microphone denied. Allow mic access and try again.'); }
+          if (mounted()) { setCallStatus('Call Failed'); setConnectionError('Mic permission denied. Allow microphone access and try again.'); }
           return;
         }
       }
@@ -245,253 +258,272 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
       localStreamRef.current = stream;
       if (localVideoRef.current) { localVideoRef.current.srcObject = stream; localVideoRef.current.play().catch(() => {}); }
 
-      // ── Step 2: Create RTCPeerConnection ───────────────────────────────────
+      // ── 2. Create RTCPeerConnection ───────────────────────────────────────
       const pc = new RTCPeerConnection(RTCConfig);
       pcRef.current = pc;
-      log('PeerConnection created');
+      log('RTCPeerConnection created');
 
       stream.getTracks().forEach(t => { t.enabled = true; pc.addTrack(t, stream); });
 
-      pc.ontrack = (event) => {
+      pc.ontrack = (ev) => {
         if (!mounted()) return;
-        log('ontrack fired — streams:', event.streams.length, 'track kind:', event.track.kind);
-        let rs = event.streams?.[0];
+        log('ontrack', ev.track.kind, 'streams:', ev.streams.length);
+        let rs = ev.streams?.[0];
         if (!rs) {
           if (!remoteStreamRef.current) remoteStreamRef.current = new MediaStream();
-          remoteStreamRef.current.addTrack(event.track);
+          remoteStreamRef.current.addTrack(ev.track);
           rs = remoteStreamRef.current;
         }
-        event.track.enabled = true;
+        ev.track.enabled = true;
         attachRemoteStream(rs);
         setCallStatus('Connected');
         if (!callStartTime.current) callStartTime.current = Date.now();
         setIsReconnecting(false); setConnectionError('');
       };
 
-      pc.onicecandidate = async (e) => {
-        if (!mounted() || !e.candidate) return;
-        const cJson = e.candidate.toJSON();
-        log('Local ICE candidate:', cJson.candidate?.substring(0, 60));
-        const role = call.isCaller ? 'caller' : 'receiver';
-
-        // PRIMARY: save to DB so partner can find it via realtime
-        try {
-          await supabase.from('ice_candidates').insert({ signal_id: call.callId, candidate: cJson, role });
-        } catch (err) { log('ICE DB insert failed:', err); }
-
-        // BONUS: also broadcast for speed
-        channelsRef.current.forEach(ch => {
-          ch.send?.({ type: 'broadcast', event: 'ice', payload: { c: cJson, role } }).catch(() => {});
-        });
-      };
-
       pc.oniceconnectionstatechange = () => {
         if (!mounted()) return;
         const s = pc.iceConnectionState;
-        log('ICE connection state:', s);
+        log('ICE state →', s);
         setDebugInfo(`ICE: ${s}`);
         if (s === 'connected' || s === 'completed') {
           setCallStatus('Connected'); setIsReconnecting(false); setConnectionError('');
           if (!callStartTime.current) callStartTime.current = Date.now();
         } else if (s === 'failed') {
           setIsReconnecting(true); setCallStatus('Reconnecting...');
-          log('ICE failed, attempting restartIce');
           if (call.isCaller) pc.restartIce();
-        } else if (s === 'disconnected') { setIsReconnecting(true); setCallStatus('Reconnecting...'); }
-        else if (s === 'closed' && !endedRef.current) { setCallStatus('Ended'); setTimeout(onEndCall, 1000); }
+        } else if (s === 'disconnected') {
+          setIsReconnecting(true); setCallStatus('Reconnecting...');
+        } else if (s === 'closed' && !endedRef.current) {
+          setCallStatus('Ended'); setTimeout(onEndCall, 1000);
+        }
       };
 
       pc.onconnectionstatechange = () => {
         if (!mounted()) return;
-        log('Connection state:', pc.connectionState);
-        if (pc.connectionState === 'failed') setConnectionError('Connection failed — check your network.');
+        log('Connection state →', pc.connectionState);
+        if (pc.connectionState === 'failed') setConnectionError('Connection failed. Check your internet connection.');
       };
 
-      // ── Step 3: Supabase Broadcast channel (speed bonus only, NOT primary) ─
+      pc.onicegatheringstatechange = () => {
+        log('ICE gathering →', pc.iceGatheringState);
+      };
+
+      // ── 3. ICE candidate handler (save to DB + broadcast) ─────────────────
+      const myRole = call.isCaller ? 'caller' : 'receiver';
+      const partnerRole = call.isCaller ? 'receiver' : 'caller';
+
+      pc.onicecandidate = async (e) => {
+        if (!mounted() || !e.candidate) return;
+        const cJson = e.candidate.toJSON();
+        log(`Sending ICE [${myRole}]:`, cJson.candidate?.substring(0, 50));
+        // PRIMARY: DB
+        await dbExec(supabase.from('ice_candidates').insert({ signal_id: call.callId, candidate: cJson, role: myRole }));
+        // BONUS: broadcast
+        channelsRef.current.forEach(ch => { bcastSend(ch, 'ice', { c: cJson, role: myRole }); });
+      };
+
+      // ── 4. Build broadcast channel with ALL listeners BEFORE subscribing ───
+      // CRITICAL: All .on() handlers MUST be chained before .subscribe().
+      // Any .on() called after .subscribe() is silently ignored by Supabase.
       const CH = `vc-${call.callId}`;
       const bcast = supabase.channel(CH, { config: { broadcast: { self: false, ack: false } } });
       channelsRef.current.push(bcast);
 
-      // Listen for ICE via broadcast fast path
-      bcast
-        .on('broadcast', { event: 'ice' }, async ({ payload }) => {
-          if (!mounted()) return;
-          // Only process from partner's role
-          const myRole = call.isCaller ? 'caller' : 'receiver';
-          if (payload.role !== myRole) { // payload.role is sender's role, so accept opposite
-            await addIceCandidate(payload.c);
-          }
-        })
-        .on('broadcast', { event: 'call-end' }, () => {
-          if (!mounted()) return;
-          setCallStatus('Ended'); setTimeout(onEndCall, 1000);
-        });
-
-      // ── Step 4: DB + Realtime postgres_changes (PRIMARY SIGNALING) ─────────
-      // Subscribe to call_signals row updates
+      // ── 5. Register DB (postgres_changes) listeners ───────────────────────
       const sigCh = supabase.channel(`sig-${call.callId}`)
         .on('postgres_changes', {
           event: 'UPDATE', schema: 'public', table: 'call_signals', filter: `id=eq.${call.callId}`,
         }, async (payload) => {
           if (!mounted()) return;
           const row = payload.new as any;
-          log('call_signals UPDATE:', { status: row.status, hasOffer: !!row.offer, hasAnswer: !!row.answer });
-
+          log('call_signals UPDATE → status:', row.status, 'hasOffer:', !!row.offer, 'hasAnswer:', !!row.answer);
           if (row.status === 'ended' || row.status === 'rejected') {
-            setCallStatus('Ended'); setTimeout(onEndCall, 1000); return;
+            if (!endedRef.current) { setCallStatus('Ended'); setTimeout(onEndCall, 1000); }
+            return;
           }
-
-          // CALLER: pick up answer from DB update
+          // Caller receives answer via DB
           if (call.isCaller && row.answer && !pc.currentRemoteDescription) {
-            log('Caller: got answer from DB');
+            log('CALLER: got answer from DB');
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(row.answer));
               remoteDescSet.current = true;
               await drainPendingCandidates();
               setCallStatus('Connected');
               if (!callStartTime.current) callStartTime.current = Date.now();
-            } catch (e) { log('Caller: setRemoteDescription(answer) error:', e); }
+            } catch (e) { log('setRemoteDescription(answer) error:', e); }
           }
-
-          // RECEIVER: pick up offer from DB update (when caller saves it)
+          // Receiver gets offer via DB update
           if (!call.isCaller && row.offer && !pc.currentRemoteDescription) {
-            log('Receiver: got offer from DB update');
-            await processOffer(pc, row.offer);
+            log('RECEIVER: got offer via DB realtime');
+            await processOffer(row.offer);
           }
         })
-        .subscribe((status) => {
-          log('sig channel status:', status);
-        });
+        .subscribe((s) => { log('sigCh subscribe status:', s); });
       channelsRef.current.push(sigCh);
 
-      // Subscribe to ICE candidates from partner
-      const myRole = call.isCaller ? 'caller' : 'receiver';
-      const partnerRole = call.isCaller ? 'receiver' : 'caller';
       const iceCh = supabase.channel(`ice-${call.callId}-${myRole}`)
         .on('postgres_changes', {
-          event: 'INSERT', schema: 'public', table: 'ice_candidates',
-          filter: `signal_id=eq.${call.callId}`,
+          event: 'INSERT', schema: 'public', table: 'ice_candidates', filter: `signal_id=eq.${call.callId}`,
         }, async (payload) => {
           if (!mounted()) return;
           const row = payload.new as any;
           if (row.role === partnerRole) {
-            log('Got ICE candidate from DB for role:', row.role);
-            await addIceCandidate(row.candidate);
+            log(`ICE from DB [${row.role}]`);
+            await addIceCandidateSafe(row.candidate);
           }
         })
-        .subscribe((status) => { log('ice channel status:', status); });
+        .subscribe((s) => { log('iceCh subscribe status:', s); });
       channelsRef.current.push(iceCh);
 
-      // Subscribe broadcast channel after setting up DB listeners
-      bcast.subscribe((status) => { log('broadcast channel status:', status); });
-
-      // helper: process offer → create and send answer
-      async function processOffer(peerConn: RTCPeerConnection, offerSdp: any) {
-        if (!mounted()) return;
+      // ── processOffer: receive SDP offer, create and send answer ───────────
+      // Defined as variable before bcast.on() so it's accessible in closures
+      const processOffer = async (offerSdp: any) => {
+        if (!mounted() || pc.currentRemoteDescription) return;
+        log('RECEIVER: processing offer');
         try {
-          log('Processing offer, setting remote description');
-          await peerConn.setRemoteDescription(new RTCSessionDescription(offerSdp));
+          await pc.setRemoteDescription(new RTCSessionDescription(offerSdp));
           remoteDescSet.current = true;
           await drainPendingCandidates();
 
-          const answer = await peerConn.createAnswer();
-          await peerConn.setLocalDescription(answer);
-          log('Answer created, saving to DB');
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          log('Answer created');
 
-          // PRIMARY: save answer to DB
-          await supabase.from('call_signals').update({
+          // PRIMARY: save answer to DB (caller picks it up via postgres_changes or poll)
+          await dbExec(supabase.from('call_signals').update({
             answer: { type: answer.type, sdp: answer.sdp },
             status: 'connected',
-          }).eq('id', call.callId);
+          }).eq('id', call.callId));
 
-          // BONUS: broadcast answer
-          bcast.send({ type: 'broadcast', event: 'answer', payload: { sdp: { type: answer.type, sdp: answer.sdp } } }).catch(() => {});
+          // BONUS: broadcast answer for speed
+          await bcastSend(bcast, 'answer', { sdp: { type: answer.type, sdp: answer.sdp } });
 
           setCallStatus('Connecting...');
+          log('Answer sent ✅');
         } catch (err) {
           log('processOffer error:', err);
-          if (mounted()) { setCallStatus('Call Failed'); setConnectionError('Could not establish connection.'); }
+          if (mounted()) { setCallStatus('Call Failed'); setConnectionError('Could not process call signal.'); }
         }
-      }
+      };
 
-      // ── Step 5: Caller creates offer ──────────────────────────────────────
+      // ── 6. Build ALL broadcast listeners BEFORE .subscribe() ─────────────
+      // ICE via broadcast (fast path from partner)
+      bcast.on('broadcast', { event: 'ice' }, async ({ payload }) => {
+        if (!mounted()) return;
+        if (payload.role === partnerRole) {
+          log(`ICE via broadcast [${payload.role}]`);
+          await addIceCandidateSafe(payload.c);
+        }
+      });
+
+      // Call end via broadcast
+      bcast.on('broadcast', { event: 'call-end' }, () => {
+        if (!mounted() || endedRef.current) return;
+        log('Call ended by partner (broadcast)');
+        setCallStatus('Ended'); setTimeout(onEndCall, 1000);
+      });
+
       if (call.isCaller) {
-        log('CALLER: creating offer');
-        const uid = (await supabase.auth.getUser()).data.user?.id || '';
-
-        // ensure call_signals row exists
-        await supabase.from('call_signals').upsert({
-          id: call.callId, caller_id: uid, receiver_id: call.contact.id,
-          is_video: call.isVideo, status: 'calling',
-        }, { onConflict: 'id' });
-
-        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-        await pc.setLocalDescription(offer);
-        log('Offer created, saving to DB');
-
-        // PRIMARY: save offer to DB (receiver will pick it up via realtime or polling)
-        await supabase.from('call_signals').update({
-          offer: { sdp: offer.sdp, type: offer.type },
-        }).eq('id', call.callId);
-
-        // BONUS: broadcast offer (if receiver is already subscribed, they get it instantly)
-        bcast.send({ type: 'broadcast', event: 'offer', payload: { sdp: { sdp: offer.sdp, type: offer.type } } }).catch(() => {});
-
-        // Also listen for answer via broadcast (fast path)
+        // Caller: listen for answer via broadcast (speed path)
         bcast.on('broadcast', { event: 'answer' }, async ({ payload }) => {
           if (!mounted() || pc.currentRemoteDescription) return;
-          log('Caller: got answer via broadcast');
+          log('CALLER: got answer via broadcast');
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
             remoteDescSet.current = true;
             await drainPendingCandidates();
             setCallStatus('Connected');
             if (!callStartTime.current) callStartTime.current = Date.now();
-          } catch (e) { log('Caller broadcast answer error:', e); }
+          } catch (e) { log('Broadcast answer error:', e); }
         });
-
       } else {
-        // ── Step 6: Receiver waits for offer ───────────────────────────────
-        log('RECEIVER: waiting for offer');
-        setCallStatus('Waiting for call...');
-
-        // Listen for offer via broadcast fast path
+        // Receiver: listen for offer via broadcast (speed path)
         bcast.on('broadcast', { event: 'offer' }, async ({ payload }) => {
           if (!mounted() || pc.currentRemoteDescription) return;
-          log('Receiver: got offer via broadcast');
-          await processOffer(pc, payload.sdp);
+          log('RECEIVER: got offer via broadcast');
+          await processOffer(payload.sdp);
         });
+      }
 
-        // DB polling fallback: poll every 300ms × 40 = 12s
-        // (Runs in parallel with realtime — whichever gets the offer first wins)
-        (async () => {
-          log('Receiver: starting DB poll for offer');
-          for (let i = 0; i < 40 && mounted() && !pc.currentRemoteDescription; i++) {
-            if (i > 0) await new Promise(r => setTimeout(r, 300));
+      // NOW subscribe (all listeners registered above)
+      bcast.subscribe((status) => {
+        log('broadcast channel status:', status);
+      });
+
+      // ── 7. CALLER: create offer ────────────────────────────────────────────
+      if (call.isCaller) {
+        log('CALLER flow starting');
+        const { data: { user: authUser } } = await supabase.auth.getUser();
+        const uid = authUser?.id || '';
+
+        // Ensure call_signals row exists (may already exist from App.tsx handleInitiateCall)
+        await dbExec(supabase.from('call_signals')
+          .update({ status: 'calling' })
+          .eq('id', call.callId));
+
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        await pc.setLocalDescription(offer);
+        log('Offer SDP created');
+
+        // PRIMARY: save offer to DB (never loses, receiver reads via realtime or poll)
+        await dbExec(supabase.from('call_signals').update({
+          offer: { sdp: offer.sdp, type: offer.type },
+        }).eq('id', call.callId));
+
+        // BONUS: broadcast offer immediately (fast path if receiver already subscribed)
+        await bcastSend(bcast, 'offer', { sdp: { sdp: offer.sdp, type: offer.type } });
+
+        log('CALLER: offer saved to DB + broadcast ✅');
+
+      } else {
+        // ── 8. RECEIVER: wait for offer ──────────────────────────────────────
+        log('RECEIVER flow starting');
+        setCallStatus('Connecting...');
+
+        // DB poll: check every 400ms for up to 15s (parallel with realtime listeners)
+        // This handles the case where postgres_changes fires before channel is fully subscribed
+        let gotOffer = false;
+        const POLL_INTERVAL = 400;
+        const POLL_MAX = 38; // ~15 seconds
+
+        for (let i = 0; i < POLL_MAX && mounted() && !gotOffer && !pc.currentRemoteDescription; i++) {
+          if (i > 0) await new Promise(r => setTimeout(r, POLL_INTERVAL));
+          try {
             const { data } = await supabase.from('call_signals')
-              .select('offer, status').eq('id', call.callId).single();
-            log(`DB poll[${i}]: status=${data?.status}, hasOffer=${!!data?.offer}`);
-            if (data?.offer && !pc.currentRemoteDescription) {
-              log('Receiver: got offer from DB poll');
-              await processOffer(pc, data.offer);
-              break;
-            }
-            if (data?.status === 'ended') {
+              .select('offer, status')
+              .eq('id', call.callId)
+              .single();
+
+            log(`Poll[${i}] status=${data?.status} hasOffer=${!!data?.offer}`);
+
+            if (data?.status === 'ended' || data?.status === 'rejected') {
               if (mounted()) { setCallStatus('Missed'); setTimeout(onEndCall, 1500); }
               return;
             }
-          }
-          if (mounted() && !pc.currentRemoteDescription) {
-            log('Receiver: offer timeout after 12s');
-            setCallStatus('No Answer'); setConnectionError('Caller did not respond in time.');
-          }
-        })();
+
+            if (data?.offer && !pc.currentRemoteDescription) {
+              gotOffer = true;
+              log('RECEIVER: offer found via DB poll');
+              await processOffer(data.offer);
+            }
+          } catch (e) { log('Poll error:', e); }
+        }
+
+        if (mounted() && !gotOffer && !pc.currentRemoteDescription) {
+          log('RECEIVER: offer timeout after 15s');
+          setCallStatus('No Answer');
+          setConnectionError('No call signal received. The caller may have cancelled.');
+        }
       }
     };
 
     run().catch(err => {
-      log('Fatal CallScreen error:', err);
-      if (mountedRef.current) { setCallStatus('Call Failed'); setConnectionError('Call could not start: ' + (err?.message || err)); }
+      log('Fatal error in CallScreen:', err);
+      if (mountedRef.current) {
+        setCallStatus('Call Failed');
+        setConnectionError('Call could not start. Please check mic permission and try again.');
+      }
     });
 
     return () => { mountedRef.current = false; cleanup(false); };
@@ -537,7 +569,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
     const el = remoteAudioRef.current;
     if (!el) return;
     if (!el.srcObject && remoteStreamRef.current) el.srcObject = remoteStreamRef.current;
-    try { await el.play(); setNeedsUnlock(false); log('Audio unlocked by user tap'); } catch {}
+    try { await el.play(); setNeedsUnlock(false); log('Audio unlocked by tap'); } catch {}
   };
 
   const isConnected = callStatus === 'Connected';
@@ -546,10 +578,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   return (
     <div className="fixed inset-0 bg-slate-950 z-50 flex flex-col items-center text-white overflow-hidden">
 
-      {/* ── CRITICAL: Remote audio ─────────────────────────────────────────────
-          Must NOT be display:none — browser suspends audio engine on hidden elements.
-          Positioned off-screen with opacity:0.01 to stay "alive" in the DOM.
-      ──────────────────────────────────────────────────────────────────────── */}
+      {/* Remote audio — NEVER hidden with display:none (kills browser audio engine) */}
       <audio
         ref={remoteAudioRef}
         autoPlay
@@ -557,7 +586,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         style={{ position: 'fixed', bottom: 0, right: 0, width: '1px', height: '1px', opacity: 0.01 }}
       />
 
-      {/* Tap to hear audio (autoplay blocked) */}
+      {/* Tap to hear (autoplay policy blocked) */}
       {needsUnlock && (
         <button onClick={handleAudioUnlock}
           className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-amber-500 text-white text-sm font-black px-5 py-3 rounded-2xl shadow-2xl animate-bounce">
@@ -603,7 +632,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           {call.isVideo && (
             <div className="w-28 h-44 bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border-2 border-white/10 relative">
               <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
-              {!isCameraOn && (<div className="absolute inset-0 bg-slate-800 flex items-center justify-center"><CameraOff size={18} className="text-white/40" /></div>)}
+              {!isCameraOn && <div className="absolute inset-0 bg-slate-800 flex items-center justify-center"><CameraOff size={18} className="text-white/40" /></div>}
             </div>
           )}
         </div>
@@ -617,17 +646,26 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
               <div className="absolute -inset-6 bg-emerald-500/15 rounded-full blur-3xl" />
               <img src={call.contact.avatarUrl} alt={call.contact.name}
                 className="relative w-36 h-36 rounded-full border-4 border-white/10 mx-auto shadow-2xl object-cover" referrerPolicy="no-referrer" />
-              {isConnected && (<div className="absolute bottom-1 right-1/2 translate-x-1/2 translate-y-1/2 bg-emerald-500 p-2 rounded-full border-4 border-slate-950"><Wifi size={13} className="text-white" /></div>)}
+              {isConnected && <div className="absolute bottom-1 right-1/2 translate-x-1/2 translate-y-1/2 bg-emerald-500 p-2 rounded-full border-4 border-slate-950"><Wifi size={13} className="text-white" /></div>}
             </div>
           )}
           <h2 className="text-4xl font-black tracking-tight drop-shadow-2xl mb-2">{call.contact.name}</h2>
           <div className={`inline-flex px-5 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest ${isConnected ? 'bg-emerald-500 text-white' : isFailed ? 'bg-red-500 text-white' : isReconnecting ? 'bg-amber-500 text-white' : 'bg-white/10 text-white/70'}`}>
             {isConnected ? fmt(duration) : callStatus}
           </div>
-          {isConnected && (<div className="flex items-center justify-center gap-1.5 mt-2"><Shield size={10} className="text-emerald-400" /><p className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">End-to-End Encrypted</p></div>)}
-          {isReconnecting && (<div className="flex items-center justify-center gap-2 mt-2 text-amber-400"><RotateCcw size={13} className="animate-spin" /><span className="text-xs font-bold">Reconnecting...</span></div>)}
+          {isConnected && (
+            <div className="flex items-center justify-center gap-1.5 mt-2">
+              <Shield size={10} className="text-emerald-400" />
+              <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">End-to-End Encrypted</p>
+            </div>
+          )}
+          {isReconnecting && (
+            <div className="flex items-center justify-center gap-2 mt-2 text-amber-400">
+              <RotateCcw size={13} className="animate-spin" />
+              <span className="text-xs font-bold">Reconnecting...</span>
+            </div>
+          )}
           {connectionError && <p className="text-xs text-red-400 mt-2 px-4 text-center">{connectionError}</p>}
-          {/* Debug info — visible during development */}
           {debugInfo && !isConnected && <p className="text-[9px] text-white/20 mt-1">{debugInfo}</p>}
         </div>
 
@@ -636,13 +674,11 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         {/* Controls */}
         <div className="w-full max-w-sm mb-8">
           <div className="flex items-center justify-center gap-4">
-            {/* Mute */}
             <button onClick={handleMute}
               className={`w-16 h-16 rounded-3xl flex items-center justify-center transition-all shadow-xl ${isMuted ? 'bg-red-500 shadow-red-500/30' : 'bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/10'}`}>
               {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
             </button>
 
-            {/* Camera (video calls) */}
             {call.isVideo && (
               <button onClick={handleCamera}
                 className={`w-16 h-16 rounded-3xl flex items-center justify-center transition-all shadow-xl ${!isCameraOn ? 'bg-red-500 shadow-red-500/30' : 'bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/10'}`}>
@@ -650,13 +686,11 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
               </button>
             )}
 
-            {/* Speaker */}
             <button onClick={handleSpeaker}
               className={`w-16 h-16 rounded-3xl flex items-center justify-center transition-all shadow-xl ${isSpeakerOn ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/10'}`}>
               {isSpeakerOn ? <Volume2 size={24} /> : <VolumeX size={24} />}
             </button>
 
-            {/* End */}
             <button onClick={handleEnd}
               className="w-20 h-20 bg-red-500 hover:bg-red-600 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-red-500/40 transition-all active:scale-90">
               <PhoneOff size={30} />
