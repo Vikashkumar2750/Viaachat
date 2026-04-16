@@ -476,7 +476,9 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       //   - Messages THEY sent → isRead:true always (you're reading them right now)
       const sorted = data.reverse().map(row => ({
         ...dbToMessage(row),
-        isRead: row.sender_id !== myId, // only mark THEIR messages as read, not YOURS
+        // MY messages: Eye-open only if partner is currently viewing (partnerViewingRef)
+        // THEIR messages: always Eye-open (we're literally reading them right now)
+        isRead: row.sender_id !== myId ? true : partnerViewingRef.current,
       }));
       if (append) {
         setMessages(prev => [...sorted, ...prev]);
@@ -516,7 +518,10 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
           // (temp-{timestamp} id) so we don't show both at once
           if (newMsg.senderId === myId) {
             const withoutTemp = prev.filter(m => !m.id.startsWith('temp-'));
-            return [...withoutTemp, newMsg];
+            // CRITICAL: preserve Eye-open (isRead:true) if partner is currently viewing.
+            // dbToMessage always returns isRead:false, so without this, the real DB row
+            // would stomp on the optimistic isRead:true and close the Eye immediately.
+            return [...withoutTemp, { ...newMsg, isRead: partnerViewingRef.current }];
           }
           // Incoming message from the other user — show browser notification
           const chatName = chat.name || newMsg.senderName || 'New message';
