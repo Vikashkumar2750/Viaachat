@@ -434,8 +434,10 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  // Prevents markAllRead() from firing on the OWN message's chat UPDATE event
-  const justSentRef = useRef(false);
+  // partnerViewing: true = other user is actively inside THIS chat right now.
+  // Used to immediately show Eye-open on messages sent while they're viewing.
+  const [partnerViewing, setPartnerViewing] = useState(false);
+  const partnerViewingRef = useRef(false); // ref copy for use inside callbacks
 
   const PAGE_SIZE = 40;
 
@@ -485,11 +487,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     }
   }, [chat.id, myId]);
 
-  // Mark all MY outgoing messages as read when the other user opens the chat
-  // (signaled by unread_count dropping to 0 via realtime update on chats table)
+  // Mark only MY outgoing messages as read (Eye-open).
+  // Called when we confirm the partner is viewing this chat.
   const markAllRead = useCallback(() => {
-    setMessages(prev => prev.map(m => ({ ...m, isRead: true })));
-  }, []);
+    setMessages(prev => prev.map(m => ({
+      ...m,
+      isRead: m.senderId === myId ? true : m.isRead,
+    })));
+  }, [myId]);
 
   useEffect(() => {
     fetchMessages(0);
@@ -545,6 +550,89 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     return () => { supabase.removeChannel(channel); };
   }, [chat.id, fetchMessages]);
 
+  // ─── FAST read-receipt via Broadcast (≤50ms) vs postgres_changes (300-800ms) ───────
+  //
+  // ARCHITECTURE:
+  //   - On mount: join `chat-view-${chat.id}` broadcast channel
+  //   - Immediately broadcast { event:'viewing', uid } so partner knows we're here
+  //   - Re-broadcast every 8s (handles partner opening chat before us subscribing)
+  //   - On unmount: broadcast { event:'view-left', uid } + leave channel
+  //   - Received 'viewing' from partner → mark my sent messages as Eye-open
+  //                                       + set partnerViewing=true
+  //   - Received 'view-left' or partner gone → partnerViewing=false
+  //
+  // This replaces the unread_count → postgres_changes → markAllRead chain which:
+  //   a) was 300-800ms slow
+  //   b) ONLY fired on unread_count CHANGE (broken if partner was already in chat)
+  //   c) had a 3s justSentRef blind spot
+  useEffect(() => {
+    if (!myId) return;
+
+    const viewCh = supabase.channel(`chat-view-${chat.id}`, {
+      config: { broadcast: { self: false, ack: false } },
+    });
+
+    viewCh
+      .on('broadcast', { event: 'viewing' }, ({ payload }) => {
+        if (payload.uid === myId) return; // ignore own echo (shouldn't happen with self:false)
+        // Partner is in this chat → all MY sent messages are now seen
+        setPartnerViewing(true);
+        partnerViewingRef.current = true;
+        markAllRead();
+      })
+      .on('broadcast', { event: 'view-left' }, ({ payload }) => {
+        if (payload.uid === myId) return;
+        setPartnerViewing(false);
+        partnerViewingRef.current = false;
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          // Announce ourselves to the partner
+          viewCh.send({ type: 'broadcast', event: 'viewing', payload: { uid: myId } });
+          // Also re-broadcast every 8s (handles partner subscribing late)
+          const ping = setInterval(() => {
+            if (partnerViewingRef.current) return; // stop pinging once partner is known
+            viewCh.send({ type: 'broadcast', event: 'viewing', payload: { uid: myId } });
+          }, 8000);
+          (viewCh as any)._ping = ping;
+        }
+      });
+
+    // When partner joins AFTER us, they'll also announce — handled by the listener above.
+    // When WE leave: tell partner so their Eye immediately closes for new messages.
+    return () => {
+      viewCh.send({ type: 'broadcast', event: 'view-left', payload: { uid: myId } });
+      clearInterval((viewCh as any)._ping);
+      supabase.removeChannel(viewCh);
+      setPartnerViewing(false);
+      partnerViewingRef.current = false;
+    };
+  }, [chat.id, myId, markAllRead]);
+
+  // ─── Typing indicator (postgres_changes on chats table UPDATE) ───────────────────
+  // NOTE: unread_count is kept for badge management only. Read receipts (Eye icon)
+  // are now driven by the broadcast 'viewing' channel above.
+  useEffect(() => {
+    const channel = supabase
+      .channel(`chat-typing-${chat.id}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'chats',
+        filter: `id=eq.${chat.id}`,
+      }, (payload) => {
+        const updated = payload.new as any;
+        // Typing status only — read receipts handled by broadcast channel above
+        const ts = updated.typing_status || {};
+        const typing = Object.entries(ts)
+          .filter(([uid, isTyping]) => isTyping && uid !== myId)
+          .map(([uid]) => uid);
+        setTypingUsers(typing);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [chat.id, myId]);
+
   // Load older messages on scroll to top
   const handleScroll = useCallback(async () => {
     const el = scrollContainerRef.current;
@@ -562,31 +650,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       });
     }
   }, [hasMore, loadingMore, page, fetchMessages]);
-
-  // ─── Typing indicator + Read receipts ───────────────────────────────────
-  useEffect(() => {
-    const channel = supabase
-      .channel(`chat-typing-${chat.id}`)
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'chats',
-        filter: `id=eq.${chat.id}`,
-      }, (payload) => {
-        const updated = payload.new as any;
-        // Typing status
-        const ts = updated.typing_status || {};
-        const typing = Object.entries(ts)
-          .filter(([uid, isTyping]) => isTyping && uid !== myId)
-          .map(([uid]) => uid);
-        setTypingUsers(typing);
-        // Read receipts: when other user reads the chat, unread_count resets to 0.
-        // Guard: ignore if WE just sent a message (chat update from our own send also has unread_count=0)
-        if (updated.unread_count === 0 && !justSentRef.current) markAllRead();
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [chat.id, myId, markAllRead]);
 
   // ─── Presence: online indicator ──────────────────────────────────────────
   // Online = last_seen within 2 minutes (updated every 30s in App.tsx)
@@ -676,9 +739,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       };
       setMessages(prev => [...prev, optimisticMsg]);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
-
-      justSentRef.current = true;
-      setTimeout(() => { justSentRef.current = false; }, 3000);
 
       // Direct DB insert (reply_to JSONB — run migration SQL if column missing)
       const payload: Record<string, any> = {

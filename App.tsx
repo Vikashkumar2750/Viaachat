@@ -218,22 +218,39 @@ const App: React.FC = () => {
     updateUserPresence(uid); // immediate on login/tab open
     const interval = setInterval(() => updateUserPresence(uid), 30000); // 30s heartbeat
 
-    // ── Instant offline: set last_seen=epoch the moment user leaves ──────────
-    const goOffline = () => setUserOffline(uid);
-    const goOnline  = () => updateUserPresence(uid);
-    const onVisibility = () => { if (document.hidden) goOffline(); else goOnline(); };
+    // ── Offline detection: go offline 5s after tab is hidden (debounced) ─────
+    // We use visibilitychange (not blur) because blur fires on ANY focus loss
+    // (clicking DevTools, address bar, etc.) which causes false offline flashes.
+    // pagehide fires immediately on page close/navigate — no 5s delay needed there.
+    let offlineTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const goOnline = () => {
+      if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null; }
+      updateUserPresence(uid);
+    };
+
+    const scheduleOffline = () => {
+      if (offlineTimer) return; // already scheduled
+      offlineTimer = setTimeout(() => {
+        setUserOffline(uid);
+        offlineTimer = null;
+      }, 5000); // 5-second grace period before going offline
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) scheduleOffline();
+      else goOnline();
+    };
 
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('focus',    goOnline);
-    window.addEventListener('pagehide', goOffline);
-    window.addEventListener('blur',     goOffline); // covers mobile backgrounding
+    window.addEventListener('focus', goOnline);
+    // pagehide = browser close / navigate away: go offline immediately (page is gone)
+    window.addEventListener('pagehide', () => setUserOffline(uid));
 
     return () => {
-      clearInterval(interval);
+      if (offlineTimer) clearTimeout(offlineTimer);
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('focus',    goOnline);
-      window.removeEventListener('pagehide', goOffline);
-      window.removeEventListener('blur',     goOffline);
+      window.removeEventListener('focus', goOnline);
     };
   }, [user?.id]);
 
