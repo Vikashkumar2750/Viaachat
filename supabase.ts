@@ -31,6 +31,7 @@ export const supabase = createClient(
     },
     realtime: {
       params: { eventsPerSecond: 10 },
+      worker: true, // Keeps WebSocket heartbeat alive even when tab is backgrounded
     },
     global: {
       headers: { 'x-application-name': 'viaachat' },
