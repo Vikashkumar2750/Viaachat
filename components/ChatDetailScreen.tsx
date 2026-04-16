@@ -101,12 +101,46 @@ function showBrowserNotification(title: string, body: string, icon = '/icon-192.
   }
 }
 
-// ─── Typing dots ─────────────────────────────────────────────────────────────
-const TypingDots: React.FC = () => (
-  <div className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-2xl rounded-bl-none shadow-sm max-w-[80px]">
-    {[0, 1, 2].map(i => (
-      <span key={i} className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-    ))}
+// ─── Avatar Typing Indicator ─────────────────────────────────────────────────
+// Shows the typing user's avatar with animated dots — appears while typing,
+// disappears when they stop or leave the chat.
+const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl, name }) => (
+  <div className="flex items-end gap-2 mb-1" style={{ animation: 'fadeSlideIn 0.2s ease-out' }}>
+    {/* Avatar with a subtle pulse ring */}
+    <div className="relative flex-shrink-0">
+      <div className="absolute inset-0 rounded-full bg-emerald-400/30 animate-ping" style={{ animationDuration: '1.8s' }} />
+      <img
+        src={avatarUrl}
+        alt={name}
+        className="relative w-8 h-8 rounded-full object-cover border-2 border-white shadow-sm"
+        referrerPolicy="no-referrer"
+      />
+    </div>
+
+    {/* Speech bubble with dots */}
+    <div className="flex items-center gap-1.5 bg-white px-3.5 py-2.5 rounded-2xl rounded-bl-none shadow-sm border border-gray-100">
+      {[0, 1, 2].map(i => (
+        <span
+          key={i}
+          className="block w-1.5 h-1.5 rounded-full bg-gray-400"
+          style={{
+            animation: 'typingBounce 1.2s ease-in-out infinite',
+            animationDelay: `${i * 0.18}s`,
+          }}
+        />
+      ))}
+    </div>
+
+    <style>{`
+      @keyframes typingBounce {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+        30% { transform: translateY(-5px); opacity: 1; }
+      }
+      @keyframes fadeSlideIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+    `}</style>
   </div>
 );
 
@@ -796,8 +830,16 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
           />
         ))}
         {typingUsers.length > 0 && (
-          <div className="flex justify-start mb-2">
-            <TypingDots />
+          <div className="flex justify-start mb-2 px-1">
+            <AvatarTyping
+              key={typingUsers[0]}
+              avatarUrl={
+                chat.isGroup
+                  ? `https://api.dicebear.com/7.x/avataaars/svg?seed=${typingUsers[0]}`
+                  : chat.avatarUrl
+              }
+              name={chat.isGroup ? typingUsers[0] : chat.name}
+            />
           </div>
         )}
         <div ref={messagesEndRef} />
