@@ -370,11 +370,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       .range(pageNum * PAGE_SIZE, (pageNum + 1) * PAGE_SIZE - 1);
 
     if (data) {
-      // Mark messages as read: if current unread_count is 0, all messages the
-      // OTHER user sent have been read. Messages WE sent are always "delivered" (✓).
-      // When the OTHER user opens the chat, unread_count becomes 0 and realtime
-      // fires, which triggers markAllRead below.
-      const sorted = data.reverse().map(row => ({ ...dbToMessage(row), isRead: true }));
+      // isRead logic:
+      //   - Messages YOU sent  → isRead:false until the OTHER user opens chat
+      //     (markAllRead() is called when unread_count drops to 0 via realtime)
+      //   - Messages THEY sent → isRead:true always (you're reading them right now)
+      const sorted = data.reverse().map(row => ({
+        ...dbToMessage(row),
+        isRead: row.sender_id !== myId, // only mark THEIR messages as read, not YOURS
+      }));
       if (append) {
         setMessages(prev => [...sorted, ...prev]);
       } else {
@@ -382,7 +385,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       }
       setHasMore(data.length === PAGE_SIZE);
     }
-  }, [chat.id]);
+  }, [chat.id, myId]);
 
   // Mark all MY outgoing messages as read when the other user opens the chat
   // (signaled by unread_count dropping to 0 via realtime update on chats table)
@@ -483,6 +486,8 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   }, [chat.id, myId, markAllRead]);
 
   // ─── Presence: online indicator ──────────────────────────────────────────
+  // Online = last_seen within 2 minutes (updated every 30s in App.tsx)
+  // Offline = no update for 2+ minutes → user closed app or lost connection
   useEffect(() => {
     if (chat.isGroup) return;
     const otherId = chat.participants.find(p => p !== myId);
@@ -496,11 +501,12 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         .single();
       if (data?.last_seen) {
         const lastSeen = new Date(data.last_seen).getTime();
-        setIsOnline(Date.now() - lastSeen < 600000); // online if active within 10min
+        // 2 minutes threshold: presence updates every 30s, so 2min gives generous buffer
+        setIsOnline(Date.now() - lastSeen < 120000);
       }
     };
     checkOnline();
-    const interval = setInterval(checkOnline, 60000);
+    const interval = setInterval(checkOnline, 30000); // check every 30s
     return () => clearInterval(interval);
   }, [chat.id, chat.isGroup, chat.participants, myId]);
 

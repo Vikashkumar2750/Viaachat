@@ -214,7 +214,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!user?.id) return;
     updateUserPresence(user.id); // immediate on login
-    const interval = setInterval(() => updateUserPresence(user.id), 60000);
+    const interval = setInterval(() => updateUserPresence(user.id), 30000) // 30s (matches 2-min online threshold);
     // Also update on tab focus
     const onFocus = () => updateUserPresence(user.id);
     window.addEventListener('focus', onFocus);
@@ -705,7 +705,7 @@ const App: React.FC = () => {
     // Register this callId so the incoming-call listener never shows the modal for it
     randomCallIdsRef.current.add(callId);
 
-    // Insert a calls row so WebRTC signaling works and history is populated
+    // 1. calls row for history
     try {
       await supabase.from('calls').upsert({
         id: callId,
@@ -716,9 +716,19 @@ const App: React.FC = () => {
         is_video: isVideo,
         duration: 0,
       }, { onConflict: 'id' });
-    } catch {
-      // non-fatal
-    }
+    } catch { /* non-fatal */ }
+
+    // 2. CRITICAL: call_signals row — CallScreen receiver polls this for the WebRTC offer.
+    // Without this row, receiver always fails with "No call signal received".
+    try {
+      await supabase.from('call_signals').upsert({
+        id: callId,
+        caller_id: isCaller ? myId : partnerId,
+        receiver_id: isCaller ? partnerId : myId,
+        is_video: isVideo,
+        status: 'calling',
+      }, { onConflict: 'id' });
+    } catch { /* non-fatal */ }
 
     setActiveCall({ contact: partnerContact, isVideo, callId, isCaller });
   }, []);
