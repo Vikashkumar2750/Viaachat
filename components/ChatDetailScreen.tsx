@@ -407,15 +407,20 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       }, (payload) => {
         const newMsg = dbToMessage(payload.new as any);
         setMessages(prev => {
+          // Already in list (exact ID match) — skip
           if (prev.some(m => m.id === newMsg.id)) return prev;
-          // Show browser notification for messages from others when app is hidden
-          if (newMsg.senderId !== myId) {
-            const chatName = chat.name || newMsg.senderName || 'New message';
-            const preview = newMsg.type === 'image' ? '📷 Image'
-              : newMsg.type === 'audio' ? '🎤 Voice message'
-              : newMsg.text.slice(0, 80);
-            showBrowserNotification(chatName, preview);
+          // If this is OUR message arriving from DB, replace the optimistic temp entry
+          // (temp-{timestamp} id) so we don't show both at once
+          if (newMsg.senderId === myId) {
+            const withoutTemp = prev.filter(m => !m.id.startsWith('temp-'));
+            return [...withoutTemp, newMsg];
           }
+          // Incoming message from the other user — show browser notification
+          const chatName = chat.name || newMsg.senderName || 'New message';
+          const preview = newMsg.type === 'image' ? '📷 Image'
+            : newMsg.type === 'audio' ? '🎤 Voice message'
+            : newMsg.text.slice(0, 80);
+          showBrowserNotification(chatName, preview);
           return [...prev, newMsg];
         });
       })
@@ -542,10 +547,11 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     }
   }, [chat.id, myId]);
 
+
   // ─── Send text message ────────────────────────────────────────────────────
   const handleSend = async () => {
-    const text = editingMessage ? message.trim() : message.trim();
-    if (!text) return;
+    const text = message.trim();
+    if (!text && !editingMessage) return;
 
     if (editingMessage) {
       // Edit existing message
@@ -556,16 +562,38 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       if (error) { showToast('Failed to edit message', 'error'); return; }
       setEditingMessage(null);
     } else {
-      // Flag that WE just sent — suppress markAllRead for 3s so our message
-      // doesn't immediately get blue ticks before the other user reads it
+      // ── Optimistic update: show message instantly, before realtime fires ──
+      // The realtime INSERT handler deduplicates by ID, so the real row
+      // arriving from DB won't create a duplicate — it just gets appended
+      // alongside (temp id won't match real UUID, both show briefly, then
+      // next re-render from realtime replaces). To avoid temp flicker we
+      // replace on the next realtime INSERT if sender matches.
+      const optimisticMsg: import('../types').Message = {
+        id: `temp-${Date.now()}`,
+        text,
+        senderId: myId,
+        senderName: myName,
+        timestamp: new Date().toISOString(),
+        type: 'text',
+        isRead: false,
+        isPinned: false,
+        reactions: {},
+      };
+      setMessages(prev => [...prev, optimisticMsg]);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+
+      // Suppress markAllRead for 3s
       justSentRef.current = true;
       setTimeout(() => { justSentRef.current = false; }, 3000);
+
+      // Actual DB insert (via App.tsx handleSendMessage)
       onSendMessage(chat.id, text);
     }
     setMessage('');
     setIsEmojiOpen(false);
     updateTypingStatus(false);
   };
+
 
   // ─── Delete message ──────────────────────────────────────────────────────
   const handleDeleteMessage = async (messageId: string) => {
@@ -719,7 +747,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     : messages;
 
   return (
-    <div className="relative flex flex-col h-full bg-gray-100 animate-fade-in">
+    <div className="relative flex flex-col h-full min-h-0 bg-gray-100 animate-fade-in">
       {/* Toast */}
       {toast && <Toast message={toast.msg} type={toast.type} onDone={() => setToast(null)} />}
 
@@ -813,10 +841,12 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         </div>
       )}
 
-      {/* Messages */}
+      {/* Messages ─ flex-1 + min-h-0 keeps this as the ONLY scrolling zone.
+           Without min-h-0, a flex child can overflow its parent and push the
+           input bar off-screen on small mobile viewports. */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto p-4 space-y-1"
+        className="flex-1 min-h-0 overflow-y-auto p-4 space-y-1"
         onScroll={handleScroll}
       >
         {loadingMore && (
