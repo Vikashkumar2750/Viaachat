@@ -1,6 +1,6 @@
 -- ================================================================
 -- ViaChat — Profile & Chat Enhancements Migration  (safe to re-run)
--- Run this in Supabase SQL Editor — each block is independent
+-- Run this in Supabase SQL Editor
 -- ================================================================
 
 -- ── 1. User profile columns ──────────────────────────────────────
@@ -15,25 +15,8 @@ ALTER TABLE public.chat_messages ADD COLUMN IF NOT EXISTS reply_to JSONB DEFAULT
 CREATE INDEX IF NOT EXISTS idx_chat_messages_sender
   ON public.chat_messages(sender_id, timestamp DESC);
 
--- ── 4. video_chat_queue table ────────────────────────────────────
---  user_id is TEXT (matches public.users.id which is TEXT, not UUID)
---  We intentionally do NOT use a foreign key here to avoid the
---  text = uuid operator error when auth.uid() (uuid) is compared
---  in RLS policies. The app enforces referential integrity in code.
-CREATE TABLE IF NOT EXISTS public.video_chat_queue (
-  user_id      TEXT PRIMARY KEY,
-  peer_id      TEXT NOT NULL,
-  display_name TEXT,
-  avatar_url   TEXT,
-  joined_at    TIMESTAMPTZ DEFAULT now(),
-  matched_with TEXT,
-  matched_peer TEXT
-);
-
--- ── 5. Enable RLS on video_chat_queue ───────────────────────────
-ALTER TABLE public.video_chat_queue ENABLE ROW LEVEL SECURITY;
-
--- ── 6. Drop old policies (safe — ignores if they don't exist) ───
+-- ── 4. video_chat_queue — drop + recreate to fix any UUID/TEXT mismatch ──
+--  We drop OLD policies first (they may reference the wrong column type).
 DO $$ BEGIN
   DROP POLICY IF EXISTS "vcq_select" ON public.video_chat_queue;
   DROP POLICY IF EXISTS "vcq_insert" ON public.video_chat_queue;
@@ -42,24 +25,46 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
--- ── 7. RLS policies — cast auth.uid() to text explicitly ─────────
---  auth.uid() returns uuid; user_id is text → must cast to match
+-- Drop and recreate the table to guarantee column types are correct.
+-- CASCADE removes old FK constraints and policies automatically.
+DROP TABLE IF EXISTS public.video_chat_queue CASCADE;
+
+CREATE TABLE public.video_chat_queue (
+  user_id      TEXT PRIMARY KEY,   -- TEXT, not UUID — matches public.users.id
+  peer_id      TEXT NOT NULL,
+  display_name TEXT,
+  avatar_url   TEXT,
+  joined_at    TIMESTAMPTZ DEFAULT now(),
+  matched_with TEXT,               -- no FK — avoids text=uuid operator errors
+  matched_peer TEXT
+);
+
+-- ── 5. Enable RLS ────────────────────────────────────────────────
+ALTER TABLE public.video_chat_queue ENABLE ROW LEVEL SECURITY;
+
+-- ── 6. RLS policies — cast BOTH sides to ::text to be type-safe ──
+--  auth.uid() returns uuid; user_id is text.
+--  Casting both sides avoids "operator does not exist: text = uuid".
 CREATE POLICY "vcq_select" ON public.video_chat_queue
-  FOR SELECT USING (auth.role() = 'authenticated');
+  FOR SELECT
+  USING (auth.role() = 'authenticated');
 
 CREATE POLICY "vcq_insert" ON public.video_chat_queue
-  FOR INSERT WITH CHECK (auth.uid()::text = user_id);
+  FOR INSERT
+  WITH CHECK (auth.uid()::text = user_id::text);
 
 CREATE POLICY "vcq_update" ON public.video_chat_queue
-  FOR UPDATE USING (auth.role() = 'authenticated');
+  FOR UPDATE
+  USING (auth.role() = 'authenticated');
 
 CREATE POLICY "vcq_delete" ON public.video_chat_queue
-  FOR DELETE USING (auth.uid()::text = user_id);
+  FOR DELETE
+  USING (auth.uid()::text = user_id::text);
 
--- ── 8. Realtime publication ──────────────────────────────────────
+-- ── 7. Enable realtime ───────────────────────────────────────────
 DO $$
 BEGIN
   ALTER PUBLICATION supabase_realtime ADD TABLE public.video_chat_queue;
 EXCEPTION WHEN duplicate_object THEN
-  NULL; -- already added, that's fine
+  NULL; -- already registered — that is fine
 END $$;
