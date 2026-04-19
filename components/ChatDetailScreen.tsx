@@ -4,7 +4,7 @@ import {
   ArrowLeft, Video, Phone, Smile, Paperclip, Send,
   Mic, MicOff, Image as ImageIcon, X, Shield, MoreVertical,
   Edit3, Trash2, Eye, EyeOff, Play, Pause, Search,
-  ChevronDown, CornerUpLeft,
+  ChevronDown, CornerUpLeft, Copy, Forward, Check,
 } from 'lucide-react';
 import { supabase, handleSupabaseError } from '../supabase';
 import type { Chat, Message, Contact } from '../types';
@@ -16,7 +16,7 @@ interface ChatDetailScreenProps {
   onInitiateCall: (contact: Contact, isVideo: boolean) => void;
 }
 
-// ─── Toast notification (simple) ─────────────────────────────────────────────
+// ─── Toast notification ───────────────────────────────────────────────────────
 const Toast: React.FC<{ message: string; type?: 'success' | 'error' | 'info'; onDone: () => void }> = ({ message, type = 'info', onDone }) => {
   useEffect(() => {
     const t = setTimeout(onDone, 3000);
@@ -81,21 +81,21 @@ const dbToMessage = (row: any): Message => ({
   timestamp: row.timestamp,
   type: row.type || 'text',
   isPinned: row.is_pinned || false,
-  isRead: false,
+  isRead: false,   // always start false; will be overridden in context
   reactions: row.reactions || {},
   replyToId:     row.reply_to?.id     || null,
   replyToText:   row.reply_to?.text   || null,
   replyToSender: row.reply_to?.sender || null,
 });
 
-// ─── Show browser notification (when app is minimized) ────────────────────────
+// ─── Show browser notification ────────────────────────────────────────────────
 function showBrowserNotification(title: string, body: string, icon = '/icon-192.png') {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  if (document.hidden) { // only when app is in background
+  if (document.hidden) {
     try {
       if (navigator.serviceWorker?.controller) {
         navigator.serviceWorker.ready.then(reg => {
-          reg.showNotification(title, { body, icon, badge: icon, vibrate: [200, 100, 200] });
+          reg.showNotification(title, { body, icon, badge: icon } as any);
         }).catch(() => {});
       } else {
         new Notification(title, { body, icon });
@@ -104,16 +104,12 @@ function showBrowserNotification(title: string, body: string, icon = '/icon-192.
   }
 }
 
-// ─── Snapchat-style Avatar Typing Indicator ───────────────────────────────────
-// Layout: [avatar peeking up] + [floating speech bubble with dots above-right]
-// Behavior: springs in from bottom, avatar breathes, dots wave, whole thing exits
-// on unmount (typing stopped / user left chat).
+// ─── Snapchat-style Typing Indicator ─────────────────────────────────────────
 const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl, name }) => (
   <div
     className="flex items-end gap-1.5"
     style={{ animation: 'scPeekIn 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) both' }}
   >
-    {/* Avatar — breathing idle animation, slightly large like Snapchat's Bitmoji */}
     <div
       className="relative flex-shrink-0 w-10 h-10"
       style={{ animation: 'scBreathe 3.2s ease-in-out infinite' }}
@@ -126,10 +122,7 @@ const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl
         style={{ border: '2.5px solid #fff', boxShadow: '0 2px 12px rgba(0,0,0,0.13)' }}
       />
     </div>
-
-    {/* Speech bubble — floats right and slightly up from avatar */}
     <div className="flex flex-col items-start mb-1">
-      {/* Main bubble */}
       <div
         className="flex items-center gap-[5px] bg-white px-[14px] py-[10px] shadow-md"
         style={{
@@ -151,7 +144,6 @@ const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl
           />
         ))}
       </div>
-      {/* Small decorative circle tail — Snapchat style */}
       <div
         style={{
           width: 7, height: 7,
@@ -164,8 +156,6 @@ const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl
         }}
       />
     </div>
-
-    {/* Keyframe definitions — inlined once on first render */}
     <style>{`
       @keyframes scPeekIn {
         0%   { opacity: 0; transform: translateY(18px) scale(0.85); }
@@ -183,7 +173,6 @@ const AvatarTyping: React.FC<{ avatarUrl: string; name: string }> = ({ avatarUrl
   </div>
 );
 
-
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 const MessageBubble: React.FC<{
   message: Message;
@@ -193,13 +182,15 @@ const MessageBubble: React.FC<{
   onEdit: () => void;
   onPin: () => void;
   onReply: (msg: Message) => void;
-}> = ({ message, myId, onReact, onDelete, onEdit, onPin, onReply }) => {
+  onForward: (msg: Message) => void;
+}> = ({ message, myId, onReact, onDelete, onEdit, onPin, onReply, onForward }) => {
   const isYou = message.senderId === myId;
   const [showReactions, setShowReactions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [copied, setCopied] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // ── Swipe-to-reply ───────────────────────────────────────────────────────
+  // ── Swipe-to-reply ───────────────────────────────────────────
   const touchStartX  = useRef(0);
   const touchStartY  = useRef(0);
   const [swipeX, setSwipeX] = useState(0);
@@ -213,8 +204,8 @@ const MessageBubble: React.FC<{
   const handleTouchMove = (e: React.TouchEvent) => {
     const dx = e.touches[0].clientX - touchStartX.current;
     const dy = e.touches[0].clientY - touchStartY.current;
-    if (Math.abs(dy) > Math.abs(dx) + 6) return; // vertical scroll wins
-    if (dx < 4) { setSwipeX(0); return; }        // left swipe ignored
+    if (Math.abs(dy) > Math.abs(dx) + 6) return;
+    if (dx < 4) { setSwipeX(0); return; }
     setSwipeX(Math.min(80, dx));
   };
   const handleTouchEnd = () => {
@@ -235,6 +226,16 @@ const MessageBubble: React.FC<{
 
   const quickReactions = ['❤️', '👍', '😂', '😮', '😢', '🙏'];
 
+  const handleCopy = () => {
+    if (message.text && !isImage && !isAudio) {
+      navigator.clipboard.writeText(message.text).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+        setShowMenu(false);
+      });
+    }
+  };
+
   // Close menu on outside click
   useEffect(() => {
     if (!showMenu) return;
@@ -249,7 +250,7 @@ const MessageBubble: React.FC<{
 
   return (
     <div className={`flex ${isYou ? 'justify-end' : 'justify-start'} mb-3 group relative`}>
-      {/* Swipe-to-reply ring: grows in from left as you swipe right */}
+      {/* Swipe ring */}
       {swipeX > 6 && (
         <div
           className="absolute left-0 top-1/2 z-10 pointer-events-none"
@@ -282,13 +283,13 @@ const MessageBubble: React.FC<{
             <span className="text-[11px] text-gray-500 leading-snug line-clamp-2">{message.replyToText}</span>
           </div>
         )}
+
         <div
           className={`rounded-2xl ${
             isImage ? 'p-0 overflow-hidden' : 'px-4 py-2'
           } shadow-sm ${
             isYou
-              // Light mint-green bubble: ticks (grey/blue) are clearly visible on this background
-              ? 'rounded-tr-none' 
+              ? 'rounded-tr-none'
               : 'bg-white text-gray-800 rounded-tl-none'
           }`}
           style={isYou ? { backgroundColor: '#e2fce5', color: '#1a1a1a' } : undefined}
@@ -313,11 +314,11 @@ const MessageBubble: React.FC<{
           {message.isPinned && (
             <span className={`text-[9px] font-black uppercase tracking-widest ${isYou ? 'text-gray-500' : 'text-emerald-500'}`}>📌 Pinned</span>
           )}
+
           <div className={`flex items-center justify-end gap-1 mt-1 ${isImage ? 'absolute bottom-2 right-2 bg-black/30 px-1.5 py-0.5 rounded-full' : ''}`}>
             <p className={`text-[10px] opacity-60 ${isImage ? 'text-white' : 'text-gray-500'}`}>
               {formatTime(message.timestamp)}
             </p>
-            {/* Eye icon: open = other user has seen it, closed = unseen */}
             {isYou && (
               message.isRead
                 ? <Eye    size={13} className={isImage ? 'text-blue-300'  : 'text-blue-500'} />
@@ -368,22 +369,37 @@ const MessageBubble: React.FC<{
           </div>
         )}
 
-        {/* Context menu */}
+        {/* Context menu — full options like modern messengers */}
         {showMenu && (
-          <div ref={menuRef} className={`absolute ${isYou ? 'right-0' : 'left-0'} bottom-full mb-2 z-30 bg-white rounded-2xl shadow-2xl border border-gray-100 overflow-hidden min-w-[140px]`}>
+          <div ref={menuRef} className={`absolute ${isYou ? 'right-0' : 'left-0'} bottom-full mb-2 z-30 bg-white rounded-2xl shadow-2xl border border-gray-100 overflow-hidden min-w-[160px]`}>
+            <button onClick={() => { onReply(message); setShowMenu(false); }}
+              className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 font-medium">
+              <CornerUpLeft size={14} className="text-emerald-500" /> Reply
+            </button>
+            {!isImage && !isAudio && (
+              <button onClick={handleCopy}
+                className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 font-medium">
+                {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} className="text-gray-400" />}
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+            )}
+            <button onClick={() => { onForward(message); setShowMenu(false); }}
+              className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 font-medium">
+              <Forward size={14} className="text-gray-400" /> Forward
+            </button>
             <button onClick={() => { onPin(); setShowMenu(false); }}
-              className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 font-medium">
+              className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 font-medium">
               📌 {message.isPinned ? 'Unpin' : 'Pin'}
             </button>
             {isYou && !isImage && !isAudio && (
               <button onClick={() => { onEdit(); setShowMenu(false); }}
-                className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 font-medium">
-                <Edit3 size={14} /> Edit
+                className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 font-medium">
+                <Edit3 size={14} className="text-gray-400" /> Edit
               </button>
             )}
             {isYou && (
               <button onClick={() => { onDelete(); setShowMenu(false); }}
-                className="w-full px-4 py-2.5 text-left text-sm text-red-500 hover:bg-red-50 flex items-center gap-2 font-medium border-t border-gray-50">
+                className="w-full px-4 py-2.5 text-left text-sm text-red-500 hover:bg-red-50 flex items-center gap-2.5 font-medium border-t border-gray-50">
                 <Trash2 size={14} /> Delete
               </button>
             )}
@@ -404,6 +420,66 @@ const categorizedEmojis: Record<string, string[]> = {
   '❤️ Symbols': ['❤️','🧡','💛','💚','💙','💜','🖤','💔','💕','💞','💓','💗','💖','💘','💝','☮️','✔️','❌','⚠️','🚫','💯','🔥','✨','🎉','🎊'],
 };
 
+// ─── Forward modal (simple) ───────────────────────────────────────────────────
+const ForwardModal: React.FC<{
+  message: Message;
+  chats: { id: string; name: string; avatarUrl: string }[];
+  myId: string;
+  myName: string;
+  onClose: () => void;
+  onForwarded: (chatId: string) => void;
+}> = ({ message, chats, myId, myName, onClose, onForwarded }) => {
+  const [sending, setSending] = useState<string | null>(null);
+
+  const forward = async (chatId: string) => {
+    setSending(chatId);
+    const payload: Record<string, any> = {
+      chat_id: chatId,
+      text: message.text,
+      sender_id: myId,
+      sender_name: myName,
+      timestamp: new Date().toISOString(),
+      type: message.type || 'text',
+    };
+    await supabase.from('chat_messages').insert(payload);
+    await supabase.from('chats').update({
+      last_message: message.type === 'image' ? '📷 Photo' : message.type === 'audio' ? '🎤 Voice' : message.text.slice(0, 80),
+      last_message_time: new Date().toISOString(),
+    }).eq('id', chatId);
+    setSending(null);
+    onForwarded(chatId);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[100] flex items-end justify-center p-4 animate-fade-in">
+      <div className="bg-white w-full max-w-md rounded-t-3xl overflow-hidden shadow-2xl animate-slide-up">
+        <div className="p-4 flex items-center justify-between border-b">
+          <h3 className="text-base font-black text-gray-800">Forward message</h3>
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600"><X size={20} /></button>
+        </div>
+        <div className="max-h-80 overflow-y-auto divide-y divide-gray-50">
+          {chats.map(c => (
+            <button
+              key={c.id}
+              onClick={() => forward(c.id)}
+              disabled={sending === c.id}
+              className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 active:bg-gray-100 transition-colors"
+            >
+              <img src={c.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${c.id}`}
+                alt={c.name} className="w-10 h-10 rounded-full object-cover" />
+              <span className="text-sm font-semibold text-gray-800 flex-1 text-left">{c.name}</span>
+              {sending === c.id
+                ? <div className="w-5 h-5 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
+                : <Forward size={16} className="text-gray-300" />
+              }
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   chat, onClose, onSendMessage, onInitiateCall,
@@ -415,8 +491,9 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const [isAttachmentOpen, setIsAttachmentOpen] = useState(false);
   const [isEmojiOpen, setIsEmojiOpen] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [replyTo,     setReplyTo]     = useState<Message | null>(null);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isRecording, setIsRecording] = useState(false);
@@ -426,6 +503,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [allChats, setAllChats] = useState<{ id: string; name: string; avatarUrl: string }[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -434,10 +512,11 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  // partnerViewing: true = other user is actively inside THIS chat right now.
-  // Used to immediately show Eye-open on messages sent while they're viewing.
   const [partnerViewing, setPartnerViewing] = useState(false);
-  const partnerViewingRef = useRef(false); // ref copy for use inside callbacks
+  const partnerViewingRef = useRef(false);
+  // Track which message IDs have already been seen by partner
+  // CRITICAL: once a message is seen, it must never go back to unseen
+  const seenMessageIds = useRef<Set<string>>(new Set());
 
   const PAGE_SIZE = 40;
 
@@ -460,6 +539,13 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     });
   }, []);
 
+  // Load chats list for forward modal
+  useEffect(() => {
+    supabase.from('chats').select('id, name, avatar_url').then(({ data }) => {
+      if (data) setAllChats(data.map(c => ({ id: c.id, name: c.name, avatarUrl: c.avatar_url })));
+    });
+  }, []);
+
   // ─── Fetch messages (paginated) ───────────────────────────────────────────
   const fetchMessages = useCallback(async (pageNum: number, append = false) => {
     const { data } = await supabase
@@ -470,16 +556,24 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       .range(pageNum * PAGE_SIZE, (pageNum + 1) * PAGE_SIZE - 1);
 
     if (data) {
-      // isRead logic:
-      //   - Messages YOU sent  → isRead:false until the OTHER user opens chat
-      //     (markAllRead() is called when unread_count drops to 0 via realtime)
-      //   - Messages THEY sent → isRead:true always (you're reading them right now)
-      const sorted = data.reverse().map(row => ({
-        ...dbToMessage(row),
-        // MY messages: Eye-open only if partner is currently viewing (partnerViewingRef)
-        // THEIR messages: always Eye-open (we're literally reading them right now)
-        isRead: row.sender_id !== myId ? true : partnerViewingRef.current,
-      }));
+      const sorted = data.reverse().map(row => {
+        const msg = dbToMessage(row);
+        // CRITICAL SEEN LOGIC:
+        // 1. If we already know this message was seen (in seenMessageIds), keep isRead:true
+        // 2. If partner is currently viewing, our sent msgs are also seen
+        // 3. Their messages are always "seen" by us (we're reading them)
+        const alreadySeen = seenMessageIds.current.has(row.id);
+        if (alreadySeen) {
+          return { ...msg, isRead: true };
+        }
+        const isMineAndPartnerHere = row.sender_id === myId && partnerViewingRef.current;
+        const isTheirMsg = row.sender_id !== myId;
+        const isRead = alreadySeen || isMineAndPartnerHere || isTheirMsg;
+        if (isRead && row.sender_id === myId) {
+          seenMessageIds.current.add(row.id);
+        }
+        return { ...msg, isRead };
+      });
       if (append) {
         setMessages(prev => [...sorted, ...prev]);
       } else {
@@ -489,19 +583,20 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     }
   }, [chat.id, myId]);
 
-  // Mark only MY outgoing messages as read (Eye-open).
-  // Called when we confirm the partner is viewing this chat.
+  // Mark MY outgoing messages as read — always uses seenMessageIds to prevent regression
   const markAllRead = useCallback(() => {
-    setMessages(prev => prev.map(m => ({
-      ...m,
-      isRead: m.senderId === myId ? true : m.isRead,
-    })));
+    setMessages(prev => prev.map(m => {
+      if (m.senderId === myId) {
+        seenMessageIds.current.add(m.id);
+        return { ...m, isRead: true };
+      }
+      return m;
+    }));
   }, [myId]);
 
   useEffect(() => {
     fetchMessages(0);
 
-    // Real-time new messages
     const channel = supabase
       .channel(`chat-messages-${chat.id}`)
       .on('postgres_changes', {
@@ -512,18 +607,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       }, (payload) => {
         const newMsg = dbToMessage(payload.new as any);
         setMessages(prev => {
-          // Already in list (exact ID match) — skip
           if (prev.some(m => m.id === newMsg.id)) return prev;
-          // If this is OUR message arriving from DB, replace the optimistic temp entry
-          // (temp-{timestamp} id) so we don't show both at once
           if (newMsg.senderId === myId) {
             const withoutTemp = prev.filter(m => !m.id.startsWith('temp-'));
-            // CRITICAL: preserve Eye-open (isRead:true) if partner is currently viewing.
-            // dbToMessage always returns isRead:false, so without this, the real DB row
-            // would stomp on the optimistic isRead:true and close the Eye immediately.
-            return [...withoutTemp, { ...newMsg, isRead: partnerViewingRef.current }];
+            // Preserve seen state if partner is viewing
+            const isRead = partnerViewingRef.current;
+            if (isRead) seenMessageIds.current.add(newMsg.id);
+            return [...withoutTemp, { ...newMsg, isRead }];
           }
-          // Incoming message from the other user — show browser notification
           const chatName = chat.name || newMsg.senderName || 'New message';
           const preview = newMsg.type === 'image' ? '📷 Image'
             : newMsg.type === 'audio' ? '🎤 Voice message'
@@ -538,9 +629,17 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         table: 'chat_messages',
         filter: `chat_id=eq.${chat.id}`,
       }, (payload) => {
-        setMessages(prev => prev.map(m =>
-          m.id === (payload.new as any).id ? dbToMessage(payload.new as any) : m
-        ));
+        setMessages(prev => prev.map(m => {
+          if (m.id !== (payload.new as any).id) return m;
+          const updated = dbToMessage(payload.new as any);
+          // CRITICAL: If message was already seen in-memory, NEVER revert to unseen
+          const preserveSeen = m.isRead || seenMessageIds.current.has(m.id);
+          if (preserveSeen && m.senderId === myId) {
+            seenMessageIds.current.add(m.id);
+            return { ...updated, isRead: true };
+          }
+          return updated;
+        }));
       })
       .on('postgres_changes', {
         event: 'DELETE',
@@ -549,27 +648,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         filter: `chat_id=eq.${chat.id}`,
       }, (payload) => {
         setMessages(prev => prev.filter(m => m.id !== (payload.old as any).id));
+        seenMessageIds.current.delete((payload.old as any).id);
       })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, [chat.id, fetchMessages]);
 
-  // ─── FAST read-receipt via Broadcast (≤50ms) vs postgres_changes (300-800ms) ───────
-  //
-  // ARCHITECTURE:
-  //   - On mount: join `chat-view-${chat.id}` broadcast channel
-  //   - Immediately broadcast { event:'viewing', uid } so partner knows we're here
-  //   - Re-broadcast every 8s (handles partner opening chat before us subscribing)
-  //   - On unmount: broadcast { event:'view-left', uid } + leave channel
-  //   - Received 'viewing' from partner → mark my sent messages as Eye-open
-  //                                       + set partnerViewing=true
-  //   - Received 'view-left' or partner gone → partnerViewing=false
-  //
-  // This replaces the unread_count → postgres_changes → markAllRead chain which:
-  //   a) was 300-800ms slow
-  //   b) ONLY fired on unread_count CHANGE (broken if partner was already in chat)
-  //   c) had a 3s justSentRef blind spot
+  // ─── Fast read-receipt via Broadcast ─────────────────────────────────────
   useEffect(() => {
     if (!myId) return;
 
@@ -579,8 +665,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
     viewCh
       .on('broadcast', { event: 'viewing' }, ({ payload }) => {
-        if (payload.uid === myId) return; // ignore own echo (shouldn't happen with self:false)
-        // Partner is in this chat → all MY sent messages are now seen
+        if (payload.uid === myId) return;
         setPartnerViewing(true);
         partnerViewingRef.current = true;
         markAllRead();
@@ -589,34 +674,30 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         if (payload.uid === myId) return;
         setPartnerViewing(false);
         partnerViewingRef.current = false;
+        // NOTE: do NOT revert any seenMessageIds — once seen, always seen
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          // Announce ourselves to the partner
           viewCh.send({ type: 'broadcast', event: 'viewing', payload: { uid: myId } });
-          // Also re-broadcast every 8s (handles partner subscribing late)
           const ping = setInterval(() => {
-            if (partnerViewingRef.current) return; // stop pinging once partner is known
+            if (partnerViewingRef.current) return;
             viewCh.send({ type: 'broadcast', event: 'viewing', payload: { uid: myId } });
           }, 8000);
           (viewCh as any)._ping = ping;
         }
       });
 
-    // When partner joins AFTER us, they'll also announce — handled by the listener above.
-    // When WE leave: tell partner so their Eye immediately closes for new messages.
     return () => {
       viewCh.send({ type: 'broadcast', event: 'view-left', payload: { uid: myId } });
       clearInterval((viewCh as any)._ping);
       supabase.removeChannel(viewCh);
       setPartnerViewing(false);
       partnerViewingRef.current = false;
+      // Don't clear seenMessageIds — they persist the session
     };
   }, [chat.id, myId, markAllRead]);
 
-  // ─── Typing indicator (postgres_changes on chats table UPDATE) ───────────────────
-  // NOTE: unread_count is kept for badge management only. Read receipts (Eye icon)
-  // are now driven by the broadcast 'viewing' channel above.
+  // ─── Typing indicator ─────────────────────────────────────────────────────
   useEffect(() => {
     const channel = supabase
       .channel(`chat-typing-${chat.id}`)
@@ -627,7 +708,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         filter: `id=eq.${chat.id}`,
       }, (payload) => {
         const updated = payload.new as any;
-        // Typing status only — read receipts handled by broadcast channel above
         const ts = updated.typing_status || {};
         const typing = Object.entries(ts)
           .filter(([uid, isTyping]) => isTyping && uid !== myId)
@@ -649,21 +729,17 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       await fetchMessages(nextPage, true);
       setPage(nextPage);
       setLoadingMore(false);
-      // Maintain scroll position
       requestAnimationFrame(() => {
         el.scrollTop = el.scrollHeight - prevHeight;
       });
     }
   }, [hasMore, loadingMore, page, fetchMessages]);
 
-  // ─── Presence: online indicator ──────────────────────────────────────────
-  // Online = last_seen within 2 minutes (updated every 30s in App.tsx)
-  // Offline = no update for 2+ minutes → user closed app or lost connection
+  // ─── Presence ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (chat.isGroup) return;
     const otherId = chat.participants.find(p => p !== myId);
     if (!otherId) return;
-
     const checkOnline = async () => {
       const { data } = await supabase
         .from('users')
@@ -671,13 +747,11 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         .eq('id', otherId)
         .single();
       if (data?.last_seen) {
-        const lastSeen = new Date(data.last_seen).getTime();
-        // 2 minutes threshold: presence updates every 30s, so 2min gives generous buffer
-        setIsOnline(Date.now() - lastSeen < 120000);
+        setIsOnline(Date.now() - new Date(data.last_seen).getTime() < 120000);
       }
     };
     checkOnline();
-    const interval = setInterval(checkOnline, 30000); // check every 30s
+    const interval = setInterval(checkOnline, 30000);
     return () => clearInterval(interval);
   }, [chat.id, chat.isGroup, chat.participants, myId]);
 
@@ -699,7 +773,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     }
   };
 
-  // Auto-scroll to bottom on new messages
+  // Auto-scroll on new messages
   useEffect(() => {
     if (page === 0) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -712,7 +786,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       supabase.from('chats').update({ unread_count: 0 }).eq('id', chat.id);
     }
   }, [chat.id, myId]);
-
 
   // ─── Send text message ────────────────────────────────────────────────────
   const handleSend = async () => {
@@ -727,15 +800,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       if (error) { showToast('Failed to edit message', 'error'); return; }
       setEditingMessage(null);
     } else {
-      // Optimistic update — visible instantly
-      const optimisticMsg: import('../types').Message = {
+      const optimisticMsg: Message = {
         id: `temp-${Date.now()}`,
         text,
         senderId: myId,
         senderName: myName,
         timestamp: new Date().toISOString(),
         type: 'text',
-        isRead: false,
+        isRead: partnerViewingRef.current, // optimistically show seen if partner is here
         isPinned: false,
         reactions: {},
         replyToId:     replyTo?.id         || null,
@@ -745,7 +817,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       setMessages(prev => [...prev, optimisticMsg]);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
 
-      // Direct DB insert (reply_to JSONB — run migration SQL if column missing)
       const payload: Record<string, any> = {
         chat_id: chat.id, text, sender_id: myId, sender_name: myName,
         timestamp: new Date().toISOString(), type: 'text',
@@ -759,7 +830,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       }
       const { error: sendErr } = await supabase.from('chat_messages').insert(payload);
       if (sendErr?.message?.includes('reply_to')) {
-        // reply_to column not yet created — retry without it
         delete payload.reply_to;
         await supabase.from('chat_messages').insert(payload);
       }
@@ -775,7 +845,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     setIsAttachmentOpen(false);
     updateTypingStatus(false);
   };
-
 
   // ─── Delete message ──────────────────────────────────────────────────────
   const handleDeleteMessage = async (messageId: string) => {
@@ -811,75 +880,46 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     const file = e.target.files?.[0];
     if (!file || !myId) return;
     setIsAttachmentOpen(false);
-
-    if (file.size > 5 * 1024 * 1024) {
-      showToast('Image too large (max 5MB)', 'error');
-      return;
-    }
-
+    if (file.size > 5 * 1024 * 1024) { showToast('Image too large (max 5MB)', 'error'); return; }
     showToast('Sending image...', 'info');
-
     const reader = new FileReader();
     reader.onloadend = async () => {
       const base64 = reader.result as string;
       const { error } = await supabase.from('chat_messages').insert({
-        chat_id: chat.id,
-        text: base64,
-        sender_id: myId,
-        sender_name: myName,
-        timestamp: new Date().toISOString(),
-        type: 'image',
+        chat_id: chat.id, text: base64, sender_id: myId, sender_name: myName,
+        timestamp: new Date().toISOString(), type: 'image',
       });
       if (error) {
         showToast('Failed to send image', 'error');
       } else {
-        // Update last message
-        await supabase.from('chats').update({
-          last_message: '📷 Photo',
-          last_message_time: new Date().toISOString(),
-        }).eq('id', chat.id);
+        await supabase.from('chats').update({ last_message: '📷 Photo', last_message_time: new Date().toISOString() }).eq('id', chat.id);
         showToast('Image sent!', 'success');
       }
     };
     reader.readAsDataURL(file);
-
-    // Reset input
     if (imageInputRef.current) imageInputRef.current.value = '';
   };
 
-  // ─── Voice message recording ──────────────────────────────────────────────
+  // ─── Voice recording ──────────────────────────────────────────────────────
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-
-        // Convert to base64
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64 = reader.result as string;
           const { error } = await supabase.from('chat_messages').insert({
-            chat_id: chat.id,
-            text: base64,
-            sender_id: myId,
-            sender_name: myName,
-            timestamp: new Date().toISOString(),
-            type: 'audio',
+            chat_id: chat.id, text: base64, sender_id: myId, sender_name: myName,
+            timestamp: new Date().toISOString(), type: 'audio',
           });
           if (!error) {
-            await supabase.from('chats').update({
-              last_message: '🎤 Voice message',
-              last_message_time: new Date().toISOString(),
-            }).eq('id', chat.id);
+            await supabase.from('chats').update({ last_message: '🎤 Voice message', last_message_time: new Date().toISOString() }).eq('id', chat.id);
             showToast('Voice message sent!', 'success');
           } else {
             showToast('Failed to send voice message', 'error');
@@ -887,7 +927,6 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         };
         reader.readAsDataURL(audioBlob);
       };
-
       mediaRecorder.start(100);
       setIsRecording(true);
       setRecordingTime(0);
@@ -907,7 +946,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
   const cancelRecording = () => {
     if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.onstop = null; // don't send
+      mediaRecorderRef.current.onstop = null;
       mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
@@ -923,27 +962,31 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
     avatarUrl: chat.avatarUrl,
   };
 
-  // Filtered messages for search
   const displayMessages = searchQuery
     ? messages.filter(m => m.text.toLowerCase().includes(searchQuery.toLowerCase()))
     : messages;
 
   return (
     <div className="relative flex flex-col h-full min-h-0 bg-gray-100 animate-fade-in">
-      {/* Toast */}
       {toast && <Toast message={toast.msg} type={toast.type} onDone={() => setToast(null)} />}
 
       {/* Hidden file input */}
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleImageUpload}
-      />
+      <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+
+      {/* Forward modal */}
+      {forwardMessage && (
+        <ForwardModal
+          message={forwardMessage}
+          chats={allChats.filter(c => c.id !== chat.id)}
+          myId={myId}
+          myName={myName}
+          onClose={() => setForwardMessage(null)}
+          onForwarded={() => { setForwardMessage(null); showToast('Message forwarded!', 'success'); }}
+        />
+      )}
 
       {/* Header */}
-      <header className="p-3 flex items-center sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b shadow-sm">
+      <header className="p-3 flex items-center sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b shadow-sm flex-shrink-0">
         <button onClick={onClose} className="p-2 text-gray-600 hover:text-emerald-600 mr-1 rounded-full transition-colors">
           <ArrowLeft size={24} />
         </button>
@@ -994,7 +1037,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
       {/* Search bar */}
       {isSearchOpen && (
-        <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center gap-2">
+        <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center gap-2 flex-shrink-0">
           <Search size={16} className="text-gray-400 flex-shrink-0" />
           <input
             autoFocus
@@ -1014,7 +1057,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
       {/* Edit banner */}
       {editingMessage && (
-        <div className="px-4 py-2 bg-emerald-50 border-b border-emerald-100 flex items-center gap-2">
+        <div className="px-4 py-2 bg-emerald-50 border-b border-emerald-100 flex items-center gap-2 flex-shrink-0">
           <Edit3 size={14} className="text-emerald-600" />
           <span className="text-xs text-emerald-700 font-bold flex-1">Editing message</span>
           <button onClick={() => { setEditingMessage(null); setMessage(''); }} className="text-gray-400 hover:text-gray-600">
@@ -1023,9 +1066,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         </div>
       )}
 
-      {/* Messages ─ flex-1 + min-h-0 keeps this as the ONLY scrolling zone.
-           Without min-h-0, a flex child can overflow its parent and push the
-           input bar off-screen on small mobile viewports. */}
+      {/* Messages */}
       <div
         ref={scrollContainerRef}
         className="flex-1 min-h-0 overflow-y-auto p-4 space-y-1"
@@ -1046,6 +1087,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
             onEdit={() => { setEditingMessage(msg); setMessage(msg.text.replace(' (edited)', '')); }}
             onPin={() => handlePinMessage(msg)}
             onReply={m => { setReplyTo(m); setIsEmojiOpen(false); setIsAttachmentOpen(false); }}
+            onForward={m => setForwardMessage(m)}
           />
         ))}
         {typingUsers.length > 0 && (
@@ -1066,7 +1108,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
       {/* Emoji Picker */}
       {isEmojiOpen && (
-        <div className="absolute bottom-16 left-0 right-0 mx-auto w-full bg-white rounded-t-xl shadow-2xl p-2 z-20 overflow-y-auto max-h-60">
+        <div className="absolute bottom-16 left-0 right-0 mx-auto w-full bg-white rounded-t-xl shadow-2xl p-2 z-20 overflow-y-auto max-h-60 flex-shrink-0">
           {Object.entries(categorizedEmojis).map(([category, emojis]) => (
             <div key={category} className="mb-2">
               <h3 className="text-xs font-semibold text-gray-500 px-2 py-1 sticky top-0 bg-white">{category}</h3>
@@ -1085,7 +1127,7 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
 
       {/* Attachment menu */}
       {isAttachmentOpen && (
-        <div className="absolute bottom-16 left-4 right-4 bg-white rounded-[2rem] shadow-2xl p-4 z-20 animate-fade-in-up border border-gray-100 max-w-sm mx-auto">
+        <div className="absolute bottom-16 left-4 right-4 bg-white rounded-[2rem] shadow-2xl p-4 z-20 animate-fade-in-up border border-gray-100 max-w-sm mx-auto flex-shrink-0">
           <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-3 text-center">Attachments</h3>
           <div className="grid grid-cols-3 gap-3">
             {[
@@ -1103,9 +1145,9 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         </div>
       )}
 
-      {/* Reply banner — shows quoted message above input when replying */}
+      {/* Reply banner */}
       {replyTo && (
-        <div className="px-4 py-2 bg-white border-t border-emerald-100 flex items-center gap-2 border-l-[3px] border-l-emerald-400">
+        <div className="px-4 py-2 bg-white border-t border-emerald-100 flex items-center gap-2 border-l-[3px] border-l-emerald-400 flex-shrink-0">
           <CornerUpLeft size={14} className="text-emerald-500 flex-shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="text-[10px] font-black text-emerald-500 truncate">
@@ -1122,15 +1164,12 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
       )}
 
       {/* Input Bar */}
-      <div className="p-3 bg-white border-t flex items-center gap-2 z-10">
+      <div className="p-3 bg-white border-t flex items-center gap-2 z-10 flex-shrink-0">
         {isRecording ? (
-          // Recording UI
           <div className="flex-1 flex items-center gap-3 bg-red-50 rounded-2xl px-4 py-2.5 border border-red-100">
             <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
             <span className="text-red-600 font-bold text-sm flex-1">{formatRecordingTime(recordingTime)}</span>
-            <button onClick={cancelRecording} className="text-gray-400 hover:text-gray-600 p-1">
-              <X size={16} />
-            </button>
+            <button onClick={cancelRecording} className="text-gray-400 hover:text-gray-600 p-1"><X size={16} /></button>
           </div>
         ) : (
           <>
@@ -1165,14 +1204,14 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
         {message.trim() || editingMessage ? (
           <button
             onClick={handleSend}
-            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-emerald-500 text-white"
+            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-emerald-500 text-white flex-shrink-0"
           >
             <Send size={20} className="translate-x-0.5" />
           </button>
         ) : isRecording ? (
           <button
             onClick={stopRecording}
-            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-emerald-500 text-white"
+            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-emerald-500 text-white flex-shrink-0"
           >
             <Send size={20} />
           </button>
@@ -1182,14 +1221,13 @@ export const ChatDetailScreen: React.FC<ChatDetailScreenProps> = ({
             onMouseUp={stopRecording}
             onTouchStart={startRecording}
             onTouchEnd={stopRecording}
-            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-gray-200 text-gray-600 hover:bg-emerald-100 hover:text-emerald-600"
+            className="w-11 h-11 rounded-full flex items-center justify-center shadow-lg transition-all active:scale-90 bg-gray-200 text-gray-600 hover:bg-emerald-100 hover:text-emerald-600 flex-shrink-0"
             title="Hold to record voice message"
           >
             <Mic size={20} />
           </button>
         )}
       </div>
-
     </div>
   );
 };

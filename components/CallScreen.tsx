@@ -114,6 +114,8 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
   const channelsRef       = useRef<any[]>([]);
   const endedRef          = useRef(false);
   const mountedRef        = useRef(true);
+  // processOfferRef allows sigCh to call processOffer before it's defined in code flow
+  const processOfferRef   = useRef<(offerSdp: any) => Promise<void>>(async () => {});
 
   useRingTone(call.isCaller && callStatus === 'Calling...');
 
@@ -323,10 +325,10 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
               if (!callStartTime.current) callStartTime.current = Date.now();
             } catch (e) { log('setRemoteDesc(answer) err:', e); }
           }
-          // ── RECEIVER: incoming offer ─────────────────────────────────────
+          // ── RECEIVER: incoming offer — use ref so closure isn't stale
           if (!call.isCaller && row.offer && !pc.currentRemoteDescription) {
             log('RECEIVER: offer via DB realtime');
-            await processOffer(row.offer);
+            await processOfferRef.current(row.offer);
           }
         })
         .subscribe(s => { log('sigCh:', s); });
@@ -347,8 +349,6 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
         .subscribe(s => { log('iceCh:', s); });
       channelsRef.current.push(iceCh);
 
-      // ── processOffer: set remote desc, create answer, send, fetch ICE ─────
-      // NOTE: defined here (before bcast listeners) so closure captures properly
       const processOffer = async (offerSdp: any) => {
         if (!mounted() || pc.currentRemoteDescription) return;
         log('RECEIVER: processing offer');
@@ -357,9 +357,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           remoteDescSet.current = true;
           await drainPendingCandidates();
 
-          // CRITICAL FIX: fetch ALL caller ICE candidates already in DB
-          // Some arrive before our iceCh subscription completes and are MISSED
-          // by postgres_changes. Without this, receiver ICE stays incomplete.
+          // Fetch ALL caller ICE candidates from DB (some arrive before subscription)
           await fetchMissedIceCandidates(partnerRole);
 
           const answer = await pc.createAnswer();
@@ -377,9 +375,12 @@ export const CallScreen: React.FC<CallScreenProps> = ({ call, onEndCall }) => {
           log('Answer sent ✅');
         } catch (err) {
           log('processOffer err:', err);
-          if (mounted()) { setCallStatus('Call Failed'); setConnectionError('Could not process call signal.'); }
+          // Don't show scary error — ICE may still connect
+          if (mounted()) { setConnectionError('Establishing connection…'); }
         }
       };
+      // CRITICAL: store in ref BEFORE broadcast listeners run
+      processOfferRef.current = processOffer;
 
       // ── 7. Broadcast listeners (ALL before .subscribe()) ─────────────────
       bcast.on('broadcast', { event: 'ice' }, async ({ payload }) => {

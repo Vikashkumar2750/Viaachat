@@ -165,3 +165,51 @@ body {
 /* ── Safe area padding utilities ─────────────────────────── */
 .pt-safe-top    { padding-top: max(12px, env(safe-area-inset-top)); }
 .pb-safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+
+/* ── Dynamic viewport height (avoids keyboard-resize issues on mobile) ─── */
+.h-dvh  { height: 100dvh; }
+.min-h-dvh { min-height: 100dvh; }
+
+/* ── Scroll lock (prevent body scroll when modals open) ──── */
+.scroll-lock { overflow: hidden; position: fixed; width: 100%; }
+
+/* ── Message bubble spring-in ────────────────────────────── */
+@keyframes bubble-spring-right {
+  0%   { opacity: 0; transform: scale(0.75) translateX(28px); }
+  70%  { transform: scale(1.04) translateX(-4px); }
+  100% { opacity: 1; transform: scale(1) translateX(0); }
+}
+@keyframes bubble-spring-left {
+  0%   { opacity: 0; transform: scale(0.75) translateX(-28px); }
+  70%  { transform: scale(1.04) translateX(4px); }
+  100% { opacity: 1; transform: scale(1) translateX(0); }
+}
+.animate-bubble-spring-right { animation: bubble-spring-right 0.28s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+.animate-bubble-spring-left  { animation: bubble-spring-left  0.28s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+
+/* ── Seen eye pulse (when message transitions to seen) ───── */
+@keyframes eye-open {
+  0%   { transform: scaleY(0.1); opacity: 0; }
+  60%  { transform: scaleY(1.2); }
+  100% { transform: scaleY(1); opacity: 1; }
+}
+.animate-eye-open { animation: eye-open 0.3s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+
+/* ── Context menu zoom pop ────────────────────────────────── */
+@keyframes menu-pop {
+  0%   { opacity: 0; transform: scale(0.88) translateY(6px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-menu-pop { animation: menu-pop 0.18s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+
+/* ── Swipe arrow for reply ────────────────────────────────── */
+@keyframes swipe-arrow {
+  0%   { opacity: 0; transform: translateX(-8px) scale(0.7); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+.animate-swipe-arrow { animation: swipe-arrow 0.15s ease-out forwards; }
+
+/* ── Responsive: prevent overflow on very small devices ───── */
+@media (max-width: 380px) {
+  .max-w-\[80\%\] { max-width: 88%; }
+}

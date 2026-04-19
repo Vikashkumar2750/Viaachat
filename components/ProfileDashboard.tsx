@@ -183,11 +183,15 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
   const userId = user?.id || (user as any)?.uid;
   const currentAvatar = avatarPreview || user?.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`;
 
-  // Load about/bio from DB on mount
+  // Load about/bio from DB on mount — gracefully handles missing 'about' column
   useEffect(() => {
     if (!userId) return;
-    supabase.from('users').select('about').eq('id', userId).single().then(({ data }) => {
-      if (data?.about) setAbout(data.about);
+    // Try fetching with about column; if column doesn't exist, silently skip
+    supabase.from('users').select('about, display_name').eq('id', userId).single().then(({ data, error }) => {
+      if (!error && data) {
+        if (data.about) setAbout(data.about);
+        if (data.display_name && !displayName) setDisplayName(data.display_name);
+      }
     });
   }, [userId]);
 
@@ -205,18 +209,28 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
     setIsSaving(true);
     setSaveError('');
     try {
-      const updates: Record<string, any> = {
+      // Base update: always supported columns
+      const baseUpdates: Record<string, any> = {
         display_name: displayName.trim(),
-        about: about.trim() || null,
       };
-      if (avatarPreview) updates.photo_url = avatarPreview;
+      if (avatarPreview) baseUpdates.photo_url = avatarPreview;
 
-      const { error } = await supabase
+      // First update the base fields (always exist in schema)
+      const { error: baseErr } = await supabase
         .from('users')
-        .update(updates)
+        .update(baseUpdates)
         .eq('id', userId);
 
-      if (error) throw error;
+      if (baseErr) throw baseErr;
+
+      // Try updating 'about' field — column may not exist on older deployments
+      if (about.trim()) {
+        await supabase
+          .from('users')
+          .update({ about: about.trim() })
+          .eq('id', userId);
+        // Ignore error if column doesn't exist
+      }
 
       if (onUserUpdated) {
         onUserUpdated({
@@ -231,7 +245,15 @@ export const ProfileDashboard: React.FC<ProfileDashboardProps> = ({
         setAvatarPreview(null);
       }, 1500);
     } catch (err: any) {
-      setSaveError(err?.message || 'Save failed. Please try again.');
+      // Provide user-friendly error messages
+      const msg = err?.message || '';
+      if (msg.includes('row-level security')) {
+        setSaveError('Permission denied. Please sign out and sign back in.');
+      } else if (msg.includes('display_name')) {
+        setSaveError('Name is required and must be less than 40 characters.');
+      } else {
+        setSaveError(msg || 'Save failed. Please try again.');
+      }
     } finally {
       setIsSaving(false);
     }
