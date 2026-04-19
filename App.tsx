@@ -1,4 +1,4 @@
-﻿
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { SearchBar } from './components/SearchBar';
@@ -22,8 +22,11 @@ import { RoomDetailScreen } from './components/RoomDetailScreen';
 import { Login } from './components/Login';
 import { PostCallModal } from './components/PostCallModal';
 import { AdBanner } from './components/AdBanner';
+import { VideoChat } from './components/VideoChat';
 import { PhoneCall, UserPlus } from 'lucide-react';
 import type { Tab, Group, Contact, Message, Chat, Call, User, FriendRequest, Room } from './types';
+// VideoChat tab — shown as a fullscreen overlay when user taps Explore
+const EXPLORE_TAB: Tab = 'Rooms'; // Re-use 'Rooms' slot (Rooms is disabled)
 import {
   supabase,
   syncUser,
@@ -107,6 +110,7 @@ const App: React.FC = () => {
   const [lastCalledUser, setLastCalledUser] = useState<Contact | null>(null);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
+  const [isVideoExploreOpen, setIsVideoExploreOpen] = useState(false);
   const [isSearchingRandomCall, setIsSearchingRandomCall] = useState(false);
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -1114,7 +1118,50 @@ const App: React.FC = () => {
           />
         );
       case 'Rooms':
-        return null; // Rooms feature temporarily disabled
+        // Rooms tab is now repurposed as the "Explore" (random video chat) entry point.
+        // The actual VideoChat renders as a fullscreen overlay (see below).
+        return (
+          <div className="flex flex-col items-center justify-center h-full gap-6 p-6 text-center">
+            {/* Hero */}
+            <div className="relative">
+              <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" style={{ animationDuration: '2s' }} />
+              <div className="w-24 h-24 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-full flex items-center justify-center shadow-2xl shadow-emerald-500/40">
+                <span className="text-4xl">🎲</span>
+              </div>
+            </div>
+            <div>
+              <h2 className="text-gray-900 font-black text-2xl tracking-tight mb-1">Explore Strangers</h2>
+              <p className="text-gray-500 text-sm leading-relaxed max-w-[260px]">
+                Meet random people from around the world via live video. 100% free — no server costs.
+              </p>
+            </div>
+            <div className="w-full max-w-[280px] space-y-3">
+              <button
+                id="explore-video-start-btn"
+                onClick={() => setIsVideoExploreOpen(true)}
+                className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white py-4 rounded-2xl font-black text-base shadow-xl shadow-emerald-500/30 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <span>🎥</span>
+                Start Video Chat
+              </button>
+              <div className="flex items-center gap-3 text-xs text-gray-400 font-bold">
+                <div className="flex-1 h-px bg-gray-100" />
+                <span>How it works</span>
+                <div className="flex-1 h-px bg-gray-100" />
+              </div>
+              {[
+                { icon: '🎲', text: 'Matched with a random stranger instantly' },
+                { icon: '🔄', text: 'Hit "Next" anytime to skip to someone new' },
+                { icon: '🔒', text: 'Peer-to-peer — video never touches our servers' },
+              ].map((item, i) => (
+                <div key={i} className="flex items-center gap-3 bg-gray-50 rounded-xl px-4 py-3 text-left">
+                  <span className="text-xl">{item.icon}</span>
+                  <p className="text-gray-600 text-xs font-semibold">{item.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
       default:
         return <ChatList chats={chats} activeFilter="All" onChatSelect={setSelectedChat} onChatLongPress={setChatToDelete} />;
     }
@@ -1169,6 +1216,14 @@ const App: React.FC = () => {
         </div>
       )}
 
+
+      {/* ── Video Explore fullscreen overlay ───────────────────── */}
+      {isVideoExploreOpen && user && (
+        <VideoChat
+          user={user}
+          onBack={() => setIsVideoExploreOpen(false)}
+        />
+      )}
 
       {/* Active call overlay */}
       {activeCall && <CallScreen call={activeCall} onEndCall={handleEndCall} />}

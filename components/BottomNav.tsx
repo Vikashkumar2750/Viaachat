@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { MessageSquare, CircleDashed, Users, Phone } from 'lucide-react';
+import { MessageSquare, CircleDashed, Users, Phone, Compass } from 'lucide-react';
 import type { Tab } from '../types';
 
 interface BottomNavProps {
@@ -33,12 +33,12 @@ const NavItem: React.FC<{
 
 export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab }) => {
   return (
-    // Rooms tab REMOVED — feature disabled, use 4-tab nav
     <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-gray-900/95 backdrop-blur-xl border-t border-white/8 flex justify-around items-center shadow-2xl z-30" style={{ height: 'calc(3.75rem + env(safe-area-inset-bottom))', paddingBottom: 'env(safe-area-inset-bottom)' }}>
       <NavItem tabKey="Chats"       label="Chats"   icon={<MessageSquare size={22} />} active={activeTab === 'Chats'}       onClick={() => setActiveTab('Chats')}       badge={2} />
       <NavItem tabKey="Updates"     label="Updates" icon={<CircleDashed  size={22} />} active={activeTab === 'Updates'}     onClick={() => setActiveTab('Updates')} />
       <NavItem tabKey="Communities" label="Groups"  icon={<Users         size={22} />} active={activeTab === 'Communities'} onClick={() => setActiveTab('Communities')} />
       <NavItem tabKey="Calls"       label="Calls"   icon={<Phone         size={22} />} active={activeTab === 'Calls'}       onClick={() => setActiveTab('Calls')} />
+      <NavItem tabKey="Rooms"       label="Explore" icon={<Compass       size={22} />} active={activeTab === 'Rooms'}       onClick={() => setActiveTab('Rooms')} />
     </nav>
   );
 };
